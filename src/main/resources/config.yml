@@ -1,0 +1,224 @@
+defaults:
+  detect-range: 12.0
+  swing-range: 4.0
+  hit-range: 2.0
+  movement-speed: 1.0
+  damage: 1.0
+
+  cps:
+    min: 8
+    max: 12
+
+  rotation:
+    smooth: true
+    max-yaw-change-per-tick: 25.0
+    max-pitch-change-per-tick: 18.0
+
+  attack:
+    require-line-of-sight: true
+    max-angle: 45.0
+    respect-no-damage-ticks: true
+
+  knockback:
+    enabled: true
+    mode: VANILLA
+    horizontal: 0.53
+    vertical: 0.3622
+    extra-horizontal: 0.339
+    max-vertical: 0.4
+    navigation-pause-ticks: 5
+
+  bot:
+    sprint: true
+    invulnerable: true
+    stop-distance: 1.2
+    target-lost-timeout-ticks: 100
+
+fight:
+  ffa:
+    use-buildffa-spawn: true
+    follow-current-map-spawn: true
+    teleport-on-map-rotation: true
+    use-buildffa-hotbar-layout: true
+    ensure-helmet: true
+    fallback-helmet-material: LEATHER_HELMET
+    sync-health-objective: true
+    sync-interval-ticks: 5
+    keep-food-filled: true
+    passive-heal:
+      enabled: true
+      respect-natural-regeneration-gamerule: true
+      amount: 1.5
+      food-minimum: 18
+      satiated-interval-ticks: 60
+      peaceful-interval-ticks: 20
+    integrate-buildffa-stats: true
+    bot-death-message: "&a%victim% &fwas killed by &a%attacker%"
+    bot-leave-message: "&7[&a-&7] &a%player% &7left"
+  tab:
+    hide-from-player-list: false
+    group: bot
+    force-player-list-entry: true
+    world-scoped-player-list: true
+    visibility-sync-interval-ticks: 40
+    force-scoreboard-fallback: true
+    scoreboard-team-name: ab_bot
+    nametag-prefix: "&7"
+    nametag-suffix: "&7 [0]"
+    tablist-prefix: "&7"
+    tablist-suffix: "&7 [0]"
+    plain-player-list-suffix: " [0]"
+    fallback-scoreboard-prefix: "&7"
+    fallback-scoreboard-suffix: "&7 [0]"
+    debug: false
+  navigation:
+    use-pathfinder-for-platforms: true
+    chase-spawn-platform-targets: true
+    platform-target-detect-range: 96.0
+    platform-y-threshold: 1.35
+    spawn-platform-y-threshold: 1.0
+    path-retarget-ticks: 6
+    path-update-rate-ticks: 6
+    stationary-ticks: 30
+  detect-range: 24.0
+  spawn-detect-range: 96.0
+  movement-speed: 1.08
+  spawn-exit-speed: 0.32
+  spawn-exit-max-horizontal-speed: 0.42
+  preferred-distance: 1.65
+  too-close-distance: 0.85
+  swing-range: 4.0
+  hit-range: 3.15
+  damage: 7.0
+  damage-top-up:
+    enabled: true
+    minimum-ratio: 1.0
+  health:
+    maximum: 20.0
+    invulnerable: false
+    cancel-bedwars-fireball-damage: true
+    cancel-incoming-during-no-damage-ticks: false
+    auto-respawn: true
+    respawn-delay-ticks: 40
+  difficulty:
+    easy:
+      cps-min: 7
+      cps-max: 10
+      hit-range: 2.5
+      yaw-per-tick: 16.0
+      pitch-per-tick: 12.0
+      w-tap:
+        enabled: false
+        chance: 0.0
+    medium:
+      cps-min: 11
+      cps-max: 15
+      hit-range: 3.05
+      yaw-per-tick: 30.0
+      pitch-per-tick: 22.0
+      w-tap:
+        enabled: true
+        chance: 0.35
+        release-forward-min-ticks: 2
+        release-forward-max-ticks: 4
+    hard:
+      cps-min: 14
+      cps-max: 18
+      hit-range: 3.2
+      yaw-per-tick: 50.0
+      pitch-per-tick: 35.0
+      w-tap:
+        enabled: true
+        chance: 0.75
+        release-forward-min-ticks: 1
+        release-forward-max-ticks: 2
+  strafe:
+    enabled: true
+    minimum-duration-ticks: 8
+    maximum-duration-ticks: 24
+    speed-multiplier: 0.11
+    max-horizontal-speed: 0.36
+  w-tap:
+    enabled: true
+    chance: 0.65
+    release-forward-min-ticks: 1
+    release-forward-max-ticks: 3
+    disable-sprint-during-release: true
+    resume-sprint: true
+    cooldown-min-ticks: 3
+    cooldown-max-ticks: 7
+  s-tap:
+    enabled: false
+    chance: 0.25
+    backward-ticks-min: 1
+    backward-ticks-max: 2
+    backward-speed-multiplier: 0.35
+  hit-select:
+    enabled: false
+    chance: 0.20
+    wait-min-ticks: 1
+    wait-max-ticks: 4
+  jump:
+    enabled: true
+    combat-jump-chance: 0.04
+    cooldown-ticks: 12
+
+limits:
+  maximum-bots: 50
+
+mass:
+  leave-stagger-min-ticks: 20
+  leave-stagger-max-ticks: 70
+
+random-name-max-length: 12
+random-names:
+  - Artyom
+  - Artem
+  - Andrey
+  - Anton
+  - Daniil
+  - Danil
+  - Denis
+  - Dima
+  - Dimon
+  - Egor
+  - Gleb
+  - Ilya
+  - Ivan
+  - Kirill
+  - Kostya
+  - Maksim
+  - Matvey
+  - Misha
+  - Nikita
+  - Oleg
+  - Pavel
+  - Roma
+  - Roman
+  - Ruslan
+  - Sasha
+  - Sergey
+  - Timur
+  - Vadim
+  - Vladik
+  - Vlad
+  - Yarik
+  - Zhenya
+  - qMisha
+  - xNikita
+  - zKirill
+  - DaniilYT
+  - RomaPvP
+  - IlyaPlay
+  - JustArtem
+  - VladPro
+
+proxy-bridge:
+  enabled: true
+  channel: AllianceBots
+  server-name: ""
+  update-interval-ticks: 20
+  debug: false
+
+messages:
+  prefix: "&8[&aAlliance&fBots&8] &f"

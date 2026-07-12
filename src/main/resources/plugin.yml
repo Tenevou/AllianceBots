@@ -1,0 +1,27 @@
+name: AllianceBots
+main: ru.alliancemc.alliancebots.AllianceBotsPlugin
+version: 1.0.0
+author: AllianceMC
+depend:
+  - Citizens
+softdepend:
+  - BuildFFA
+  - TAB
+commands:
+  clipbot:
+    description: Controls Citizens clip bots.
+    usage: /clipbot
+    aliases: [bot, alliancebot, alliancebots]
+permissions:
+  alliancebots.admin:
+    description: Full access to AllianceBots.
+    default: op
+    children:
+      alliancebots.create: true
+      alliancebots.control: true
+  alliancebots.create:
+    description: Create and remove clip bots.
+    default: op
+  alliancebots.control:
+    description: Control and configure clip bots.
+    default: op
