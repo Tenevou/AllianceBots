@@ -90,6 +90,19 @@ fight:
     path-retarget-ticks: 6
     path-update-rate-ticks: 6
     stationary-ticks: 30
+    air-control-speed: 0.045
+    air-control-max-horizontal-speed: 0.34
+  building:
+    enabled: true
+    material: WOOL
+    require-inventory-block: true
+    target-y-threshold: 1.15
+    stuck-ticks: 8
+    jump-velocity: 0.42
+    jump-place-delay-ticks: 2
+    minimum-place-y-velocity: -0.12
+    cooldown-ticks: 8
+    debug: false
   detect-range: 24.0
   spawn-detect-range: 96.0
   initial-spawn-exit-only-ticks: 45

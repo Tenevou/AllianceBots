@@ -12,6 +12,7 @@ import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.BlockIterator;
 import org.bukkit.util.Vector;
 import ru.alliancemc.alliancebots.AllianceBotsPlugin;
@@ -34,9 +35,12 @@ public final class FightBotController {
     private int hitSelectWaitTicks;
     private int hitSelectCooldownTicks;
     private int lastReleaseTicks;
+    private int buildCooldownTicks;
+    private int stuckTicks;
     private boolean forwardMovementEnabled = true;
     private boolean sprintState = true;
     private boolean sTapActive;
+    private Location lastMoveLocation;
 
     public FightBotController(ClipBotTrait bot) {
         this.bot = bot;
@@ -56,6 +60,9 @@ public final class FightBotController {
             } else {
                 return;
             }
+        }
+        if (buildCooldownTicks > 0) {
+            buildCooldownTicks--;
         }
         if (bot.isInitialSpawnExitActive()) {
             Entity entity = bot.getNPC().getEntity();
@@ -267,6 +274,16 @@ public final class FightBotController {
         double preferredDistance = Math.min(bot.getSettings().getPreferredDistance(), 1.65D);
         configureNavigator(navigator, preferredDistance);
         boolean blockedLineOfSight = entity instanceof Player && !hasClearPathSight((Player) entity, target);
+        updateStuckCounter(entity, target, preferredDistance);
+
+        if (entity instanceof Player && !isGrounded((Player) entity)) {
+            navigator.cancelNavigation();
+            applyAirControl((Player) entity, target);
+            tryPlaceSupportBlock((Player) entity, target, blockedLineOfSight);
+            setSprinting((Player) entity, true);
+            bot.setState(BotState.SPRINTING);
+            return;
+        }
 
         if (distance <= tooCloseDistance) {
             navigator.cancelNavigation();
@@ -301,6 +318,10 @@ public final class FightBotController {
         if (!blockedLineOfSight) {
             applyStrafe(target);
         }
+        if (entity instanceof Player && tryPlaceSupportBlock((Player) entity, target,
+                blockedLineOfSight || hasOneBlockObstacle(entity, target) || stuckTicks >= getBuildStuckTicks())) {
+            return;
+        }
         maybeJump(entity, target, distance);
         if (entity instanceof Player) {
             setSprinting((Player) entity, true);
@@ -314,6 +335,14 @@ public final class FightBotController {
             return false;
         }
         Navigator navigator = bot.getNPC().getNavigator();
+        Player player = (Player) entity;
+        if (!isGrounded(player)) {
+            navigator.cancelNavigation();
+            applyAirControl(player, target);
+            setSprinting(player, true);
+            bot.setState(BotState.SPRINTING);
+            return true;
+        }
         if (target != null && !shouldIgnoreSpawnBotTarget(entity, target, plugin) && shouldUseSpawnPathfinder(entity, target)) {
             configureNavigator(navigator, Math.min(bot.getSettings().getPreferredDistance(), 1.65D));
             if (pathRetargetCooldown-- <= 0 || !navigator.isNavigating()) {
@@ -392,6 +421,188 @@ public final class FightBotController {
         return new Vector(Math.cos(angle) * strength, 0.0D, Math.sin(angle) * strength);
     }
 
+    private void applyAirControl(Player player, Player target) {
+        if (player == null) {
+            return;
+        }
+        Vector direction;
+        if (target != null && player.getWorld().equals(target.getWorld())) {
+            direction = target.getLocation().toVector().subtract(player.getLocation().toVector());
+        } else {
+            direction = getSpawnForwardDirection(player);
+        }
+        direction.setY(0.0D);
+        if (direction.lengthSquared() < 0.0001D) {
+            return;
+        }
+        AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
+        double speed = plugin.getConfig().getDouble("fight.navigation.air-control-speed", 0.045D);
+        double max = plugin.getConfig().getDouble("fight.navigation.air-control-max-horizontal-speed", 0.34D);
+        Vector velocity = player.getVelocity();
+        double y = velocity.getY();
+        Vector horizontal = new Vector(velocity.getX(), 0.0D, velocity.getZ())
+                .multiply(0.96D)
+                .add(direction.normalize().multiply(speed));
+        if (horizontal.lengthSquared() > max * max) {
+            horizontal.normalize().multiply(max);
+        }
+        horizontal.setY(y);
+        player.setVelocity(horizontal);
+    }
+
+    private void updateStuckCounter(Entity entity, Player target, double preferredDistance) {
+        if (entity == null || target == null) {
+            stuckTicks = 0;
+            lastMoveLocation = entity == null ? null : entity.getLocation();
+            return;
+        }
+        Location current = entity.getLocation();
+        if (lastMoveLocation == null || lastMoveLocation.getWorld() == null
+                || !lastMoveLocation.getWorld().equals(current.getWorld())) {
+            lastMoveLocation = current.clone();
+            stuckTicks = 0;
+            return;
+        }
+        boolean farEnough = current.distanceSquared(target.getLocation()) > preferredDistance * preferredDistance;
+        boolean grounded = !(entity instanceof Player) || isGrounded((Player) entity);
+        double moved = current.distanceSquared(lastMoveLocation);
+        if (farEnough && grounded && moved < 0.0036D) {
+            stuckTicks++;
+        } else {
+            stuckTicks = 0;
+        }
+        lastMoveLocation = current.clone();
+    }
+
+    @SuppressWarnings("deprecation")
+    private boolean tryPlaceSupportBlock(Player player, Player target, boolean movementBlocked) {
+        AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
+        if (player == null || target == null || plugin == null
+                || !plugin.getConfig().getBoolean("fight.building.enabled", true)) {
+            return false;
+        }
+        if (buildCooldownTicks > 0 || plugin.getBuildFfaIntegration().isPlayerInSpawn(player)) {
+            return false;
+        }
+        double yDelta = target.getLocation().getY() - player.getLocation().getY();
+        boolean targetAbove = yDelta >= plugin.getConfig().getDouble("fight.building.target-y-threshold", 1.15D);
+        boolean stuck = stuckTicks >= getBuildStuckTicks();
+        if (!targetAbove && !movementBlocked && !stuck) {
+            return false;
+        }
+
+        if (isGrounded(player)) {
+            Vector velocity = player.getVelocity();
+            if (velocity.getY() < 0.32D) {
+                velocity.setY(plugin.getConfig().getDouble("fight.building.jump-velocity", 0.42D));
+                player.setVelocity(velocity);
+                buildCooldownTicks = Math.max(1, plugin.getConfig()
+                        .getInt("fight.building.jump-place-delay-ticks", 2));
+            }
+            return true;
+        }
+
+        if (player.getVelocity().getY() < plugin.getConfig().getDouble("fight.building.minimum-place-y-velocity", -0.12D)) {
+            return false;
+        }
+        Block block = getSelfSupportPlacementBlock(player);
+        if (!canPlaceSupportBlock(player, block)) {
+            return false;
+        }
+
+        Material configuredMaterial = getConfiguredBuildMaterial();
+        int slot = findBuildBlockSlot(player, configuredMaterial);
+        boolean requireInventory = plugin.getConfig().getBoolean("fight.building.require-inventory-block", true);
+        if (requireInventory && slot < 0) {
+            return false;
+        }
+
+        ItemStack stack = slot >= 0 ? player.getInventory().getItem(slot) : new ItemStack(configuredMaterial, 1);
+        if (stack == null || stack.getType() == Material.AIR || !stack.getType().isBlock()) {
+            return false;
+        }
+        byte data = stack.getData() == null ? 0 : stack.getData().getData();
+        block.setTypeIdAndData(stack.getType().getId(), data, true);
+        plugin.getBuildFfaIntegration().registerPlacedBlock(block, stack.getType(), player);
+        consumeBuildBlock(player, slot);
+        buildCooldownTicks = Math.max(1, plugin.getConfig().getInt("fight.building.cooldown-ticks", 8));
+        stuckTicks = 0;
+        return true;
+    }
+
+    private int getBuildStuckTicks() {
+        return Math.max(2, AllianceBotsPlugin.getInstance().getConfig()
+                .getInt("fight.building.stuck-ticks", 8));
+    }
+
+    private Block getSelfSupportPlacementBlock(Player player) {
+        return player.getLocation().clone().subtract(0.0D, 0.15D, 0.0D).getBlock();
+    }
+
+    private boolean canPlaceSupportBlock(Player player, Block block) {
+        if (player == null || block == null || block.getType() != Material.AIR) {
+            return false;
+        }
+        AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
+        if (!plugin.getBuildFfaIntegration().isFfaWorld(block.getWorld())) {
+            return false;
+        }
+        if (block.getY() > plugin.getBuildFfaIntegration().getMaxBuildY(block.getWorld())) {
+            return false;
+        }
+        if (block.getRelative(0, 1, 0).getType().isSolid()) {
+            return false;
+        }
+        return hasPlacementSupport(block);
+    }
+
+    private boolean hasPlacementSupport(Block block) {
+        return isSupportBlock(block.getRelative(0, -1, 0).getType())
+                || isSupportBlock(block.getRelative(1, 0, 0).getType())
+                || isSupportBlock(block.getRelative(-1, 0, 0).getType())
+                || isSupportBlock(block.getRelative(0, 0, 1).getType())
+                || isSupportBlock(block.getRelative(0, 0, -1).getType());
+    }
+
+    private Material getConfiguredBuildMaterial() {
+        String value = AllianceBotsPlugin.getInstance().getConfig().getString("fight.building.material", "WOOL");
+        Material material = Material.getMaterial(value == null ? "WOOL" : value.toUpperCase(Locale.ENGLISH));
+        return material == null || !material.isBlock() ? Material.WOOL : material;
+    }
+
+    private int findBuildBlockSlot(Player player, Material configuredMaterial) {
+        ItemStack[] contents = player.getInventory().getContents();
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack item = contents[i];
+            if (item == null || item.getAmount() <= 0 || item.getType() == Material.AIR || !item.getType().isBlock()) {
+                continue;
+            }
+            if (item.getType() == configuredMaterial || item.getType() == Material.WOOL) {
+                if (i >= 0 && i <= 8) {
+                    player.getInventory().setHeldItemSlot(i);
+                }
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void consumeBuildBlock(Player player, int slot) {
+        if (slot < 0) {
+            return;
+        }
+        ItemStack item = player.getInventory().getItem(slot);
+        if (item == null) {
+            return;
+        }
+        if (item.getAmount() <= 1) {
+            player.getInventory().setItem(slot, null);
+        } else {
+            item.setAmount(item.getAmount() - 1);
+        }
+        player.updateInventory();
+    }
+
     private void configureNavigator(Navigator navigator, double distanceMargin) {
         float speed = (float) bot.getSettings().getMovementSpeed();
         navigator.getLocalParameters()
@@ -460,7 +671,7 @@ public final class FightBotController {
             if (isSameBlock(block, end)) {
                 return true;
             }
-            if (block.getType() != Material.AIR && block.getType().isSolid()) {
+            if (isPathBlockingBlock(block)) {
                 return false;
             }
         }
@@ -820,12 +1031,50 @@ public final class FightBotController {
             return false;
         }
         Location front = entity.getLocation().clone().add(direction.normalize().multiply(0.75D));
-        return front.getBlock().getType().isSolid() && !front.clone().add(0.0, 1.0, 0.0).getBlock().getType().isSolid();
+        Material frontType = front.getBlock().getType();
+        if (!isPathBlockingMaterial(frontType) || isStepableMaterial(frontType)) {
+            return false;
+        }
+        return !front.clone().add(0.0, 1.0, 0.0).getBlock().getType().isSolid();
     }
 
     private boolean isSafeGround(Location location) {
-        Material ground = location.clone().subtract(0.0, 1.0, 0.0).getBlock().getType();
-        return ground != Material.AIR && ground.isSolid();
+        return isSupportBlock(location.clone().subtract(0.0, 0.08D, 0.0).getBlock().getType())
+                || isSupportBlock(location.clone().subtract(0.0, 1.0D, 0.0).getBlock().getType());
+    }
+
+    private boolean isGrounded(Player player) {
+        if (player == null) {
+            return false;
+        }
+        if (player.isOnGround()) {
+            return true;
+        }
+        return isSupportBlock(player.getLocation().clone().subtract(0.0D, 0.08D, 0.0D).getBlock().getType());
+    }
+
+    private boolean isPathBlockingBlock(Block block) {
+        return block != null && isPathBlockingMaterial(block.getType());
+    }
+
+    private boolean isPathBlockingMaterial(Material material) {
+        return material != null && material != Material.AIR && material.isSolid() && !isStepableMaterial(material);
+    }
+
+    private boolean isSupportBlock(Material material) {
+        return material != null && material != Material.AIR && (material.isSolid() || isStepableMaterial(material));
+    }
+
+    private boolean isStepableMaterial(Material material) {
+        if (material == null) {
+            return false;
+        }
+        String name = material.name();
+        return name.contains("STEP")
+                || name.contains("SLAB")
+                || name.contains("STAIRS")
+                || name.equals("CARPET")
+                || name.equals("SNOW");
     }
 
     private void stopNavigation() {

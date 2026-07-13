@@ -14,6 +14,7 @@ import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
@@ -180,6 +181,34 @@ public final class BuildFfaIntegration {
             }
         }
         return 256;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public void registerPlacedBlock(Block block, Material material, Player player) {
+        if (block == null || material == null || player == null || !isAvailable()) {
+            return;
+        }
+        try {
+            Class<?> blockingClass = Class.forName("rbw.alliancemc.bffa.listeners.Blocking");
+            Field placedBlocksField = blockingClass.getField("placedBlocks");
+            Object placedBlocksObject = placedBlocksField.get(null);
+            if (!(placedBlocksObject instanceof Map)) {
+                return;
+            }
+            Map placedBlocks = (Map) placedBlocksObject;
+            Object existing = placedBlocks.get(block);
+            if (existing != null) {
+                invokeIfPresent(existing, "cancel");
+            }
+            Class<?> taskClass = Class.forName("rbw.alliancemc.bffa.objects.tasks.BlockBreakTask");
+            Constructor<?> constructor = taskClass.getConstructor(Block.class, Material.class, Player.class);
+            Object task = constructor.newInstance(block, material, player);
+            placedBlocks.put(block, task);
+        } catch (Exception ex) {
+            if (plugin.getConfig().getBoolean("fight.building.debug", false)) {
+                plugin.getLogger().warning("BuildFFA placed block registration failed: " + ex.getMessage());
+            }
+        }
     }
 
     public long getCombatLogMillis() {
