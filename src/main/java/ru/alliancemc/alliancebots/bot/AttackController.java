@@ -2,15 +2,20 @@ package ru.alliancemc.alliancebots.bot;
 
 import java.util.Random;
 import java.lang.reflect.Method;
+import net.citizensnpcs.api.CitizensAPI;
+import net.citizensnpcs.api.npc.NPC;
 import net.citizensnpcs.util.PlayerAnimation;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.block.Block;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.util.BlockIterator;
 import org.bukkit.util.Vector;
 import ru.alliancemc.alliancebots.AllianceBotsPlugin;
 import ru.alliancemc.alliancebots.api.event.ClipBotAttackEvent;
@@ -52,6 +57,7 @@ public final class AttackController {
                 double healthBefore = target.getHealth();
                 int noDamageTicksBefore = target.getNoDamageTicks();
                 double expectedFinalDamage = getExpectedFinalDamage(event.getDamage(), target);
+                rememberBotDamage(attacker, target);
                 performPlayerAttack(attacker, target);
                 boolean damaged = didDamageApply(target, healthBefore, noDamageTicksBefore);
                 boolean canForceThisTick = !bot.getSettings().isRespectNoDamageTicks() || noDamageTicksBefore <= 0;
@@ -89,7 +95,7 @@ public final class AttackController {
         if (!(entity instanceof LivingEntity)) {
             return false;
         }
-        if (!target.isOnline() || target.isDead()) {
+        if ((!CitizensAPI.getNPCRegistry().isNPC(target) && !target.isOnline()) || target.isDead()) {
             return false;
         }
         if (!isDamageableGameMode(target)) {
@@ -100,13 +106,17 @@ public final class AttackController {
         }
         LivingEntity attacker = (LivingEntity) entity;
         AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
+        if (plugin != null && !CitizensAPI.getNPCRegistry().isNPC(target)
+                && plugin.getBuildFfaIntegration().isVanished(target)) {
+            return false;
+        }
         if (bot.getMode() == BotMode.FIGHT && plugin != null && entity instanceof Player) {
             if (plugin.getBuildFfaIntegration().isPlayerInSpawn((Player) entity)
                     || plugin.getBuildFfaIntegration().isPlayerInSpawn(target)) {
                 return false;
             }
         }
-        if (bot.getSettings().isRequireLineOfSight() && !attacker.hasLineOfSight(target)) {
+        if (bot.getSettings().isRequireLineOfSight() && !hasStrictLineOfSight(attacker, target)) {
             return false;
         }
         return bot.getMode() == BotMode.FIGHT || isFacing(attacker, target);
@@ -173,11 +183,33 @@ public final class AttackController {
             return actualDamage > 0.0D;
         }
         double targetHealth = Math.max(0.0D, healthBefore - expectedFinalDamage);
+        if (targetHealth <= 0.0D && handleBotFatalTopUp(attacker, target)) {
+            debugDamageResult(target, healthBefore, expectedFinalDamage, true);
+            return true;
+        }
         if (targetHealth < target.getHealth()) {
             target.setHealth(targetHealth);
         }
         debugDamageResult(target, healthBefore - target.getHealth(), expectedFinalDamage, true);
         return target.isDead() || target.getHealth() < healthBefore;
+    }
+
+    private void rememberBotDamage(Player attacker, Player target) {
+        NPC npc = CitizensAPI.getNPCRegistry().getNPC(target);
+        if (npc == null || !npc.hasTrait(ClipBotTrait.class)) {
+            return;
+        }
+        npc.getTrait(ClipBotTrait.class).handleDamage(attacker);
+    }
+
+    private boolean handleBotFatalTopUp(Player attacker, Player target) {
+        NPC npc = CitizensAPI.getNPCRegistry().getNPC(target);
+        if (npc == null || !npc.hasTrait(ClipBotTrait.class)) {
+            return false;
+        }
+        ClipBotTrait targetBot = npc.getTrait(ClipBotTrait.class);
+        targetBot.handleDamage(attacker);
+        return targetBot.handleFatalDamage(Math.max(1.0D, target.getHealth()));
     }
 
     private double getExpectedFinalDamage(double rawDamage, Player target) {
@@ -250,7 +282,8 @@ public final class AttackController {
     }
 
     private boolean canForceFallbackDamage(Player attacker, Player target) {
-        if (attacker == null || target == null || target.isDead() || !target.isOnline()) {
+        if (attacker == null || target == null || target.isDead()
+                || (!CitizensAPI.getNPCRegistry().isNPC(target) && !target.isOnline())) {
             return false;
         }
         if (!isDamageableGameMode(target)) {
@@ -260,9 +293,70 @@ public final class AttackController {
             return false;
         }
         AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
+        if (plugin != null && !CitizensAPI.getNPCRegistry().isNPC(target)
+                && plugin.getBuildFfaIntegration().isVanished(target)) {
+            return false;
+        }
+        if (bot.getSettings().isRequireLineOfSight() && !hasStrictLineOfSight(attacker, target)) {
+            return false;
+        }
         return bot.getMode() != BotMode.FIGHT || plugin == null
                 || (!plugin.getBuildFfaIntegration().isPlayerInSpawn(attacker)
                 && !plugin.getBuildFfaIntegration().isPlayerInSpawn(target));
+    }
+
+    private boolean hasStrictLineOfSight(LivingEntity attacker, Player target) {
+        if (attacker == null || target == null || !attacker.getWorld().equals(target.getWorld())) {
+            return false;
+        }
+        if (!attacker.hasLineOfSight(target)) {
+            return false;
+        }
+        Location start = attacker.getEyeLocation();
+        Location head = target.getEyeLocation();
+        Location body = target.getLocation().clone().add(0.0D, target.getEyeHeight() * 0.55D, 0.0D);
+        return hasClearRay(start, head) || hasClearRay(start, body);
+    }
+
+    private boolean hasClearRay(Location start, Location end) {
+        if (start == null || end == null || start.getWorld() == null
+                || !start.getWorld().equals(end.getWorld())) {
+            return false;
+        }
+        Vector between = end.toVector().subtract(start.toVector());
+        double distance = between.length();
+        if (distance < 0.001D) {
+            return true;
+        }
+        BlockIterator iterator = new BlockIterator(start.getWorld(), start.toVector(), between.normalize(),
+                0.0D, (int) Math.ceil(distance));
+        while (iterator.hasNext()) {
+            Block block = iterator.next();
+            if (isSameBlock(block, start)) {
+                continue;
+            }
+            if (isSameBlock(block, end)) {
+                return true;
+            }
+            if (isBlockingHitRay(block.getType())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isSameBlock(Block block, Location location) {
+        return block != null && location != null
+                && block.getX() == location.getBlockX()
+                && block.getY() == location.getBlockY()
+                && block.getZ() == location.getBlockZ();
+    }
+
+    private boolean isBlockingHitRay(Material material) {
+        if (material == null || material == Material.AIR) {
+            return false;
+        }
+        return material.isSolid();
     }
 
     private boolean isDamageableGameMode(Player player) {
@@ -316,8 +410,7 @@ public final class AttackController {
         boolean restore = false;
         try {
             Class<?> nmsClass = attackerHandle.getClass();
-            String packageName = nmsClass.getPackage().getName();
-            Class<?> genericAttributes = Class.forName(packageName + ".GenericAttributes");
+            Class<?> genericAttributes = Class.forName(getNmsPackage() + ".GenericAttributes");
             Object attackAttribute = genericAttributes.getField("ATTACK_DAMAGE").get(null);
             Method getAttributeInstance = findGetAttributeInstanceMethod(nmsClass, attackAttribute.getClass());
             if (getAttributeInstance != null) {
@@ -344,6 +437,11 @@ public final class AttackController {
                 }
             }
         }
+    }
+
+    private String getNmsPackage() {
+        String packageName = Bukkit.getServer().getClass().getPackage().getName();
+        return "net.minecraft.server." + packageName.substring(packageName.lastIndexOf('.') + 1);
     }
 
     private Method findGetAttributeInstanceMethod(Class<?> attackerClass, Class<?> attributeClass) {

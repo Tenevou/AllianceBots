@@ -20,6 +20,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.metadata.MetadataValue;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
 import org.bukkit.plugin.Plugin;
@@ -75,6 +76,44 @@ public final class BuildFfaIntegration {
         } catch (Exception ignored) {
             return player.getLocation().getY() > getMaxBuildY(player.getWorld()) + 15;
         }
+    }
+
+    public boolean isVanished(Player player) {
+        if (player == null) {
+            return false;
+        }
+        if (hasTrueMetadata(player, "vanished")
+                || hasTrueMetadata(player, "Vanished")
+                || hasTrueMetadata(player, "premiumvanish")
+                || hasTrueMetadata(player, "invisible")) {
+            return true;
+        }
+        try {
+            Class<?> vanishApi = Class.forName("de.myzelyam.api.vanish.VanishAPI");
+            Object result = vanishApi.getMethod("isInvisible", Player.class).invoke(null, player);
+            if (result instanceof Boolean && (Boolean) result) {
+                return true;
+            }
+        } catch (Exception ignored) {
+            // PremiumVanish / SuperVanish API is optional.
+        }
+        return false;
+    }
+
+    private boolean hasTrueMetadata(Player player, String key) {
+        if (!player.hasMetadata(key)) {
+            return false;
+        }
+        for (MetadataValue value : player.getMetadata(key)) {
+            try {
+                if (value.asBoolean()) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+                // Some metadata implementations can throw on conversion.
+            }
+        }
+        return false;
     }
 
     public int getVoidHeight(World world) {
@@ -766,6 +805,21 @@ public final class BuildFfaIntegration {
         }
     }
 
+    public void refreshBotAppearance(Player player) {
+        if (player == null || !player.isValid()) {
+            return;
+        }
+        try {
+            Object playerHandle = player.getClass().getMethod("getHandle").invoke(player);
+            applyNmsPlayerListName(player, playerHandle);
+        } catch (Exception ignored) {
+            // Bukkit scoreboard fallback still handles the visible nametag.
+        }
+        ensurePlayerListEntry(player);
+        applyScoreboardFallback(player);
+        syncEquipment(player);
+    }
+
     public void syncBotHealth(Player player) {
         if (player == null || !player.isValid()
                 || !plugin.getConfig().getBoolean("fight.ffa.sync-health-objective", true)) {
@@ -868,6 +922,31 @@ public final class BuildFfaIntegration {
         } catch (Exception ignored) {
             // Bukkit/TAB formatting still handles the visible name if this field is not present.
         }
+        applyNmsPing(player, playerHandle);
+    }
+
+    private void applyNmsPing(Player player, Object playerHandle) {
+        if (player == null || playerHandle == null) {
+            return;
+        }
+        try {
+            Field field = findField(playerHandle.getClass(), "ping");
+            if (field == null) {
+                return;
+            }
+            field.setAccessible(true);
+            field.setInt(playerHandle, getTabPing(player));
+        } catch (Exception ignored) {
+            // Some forks rename the field; the real ping is harmless as fallback.
+        }
+    }
+
+    private int getTabPing(Player player) {
+        int min = Math.max(0, plugin.getConfig().getInt("fight.tab.ping.min", 5));
+        int max = Math.max(min, plugin.getConfig().getInt("fight.tab.ping.max", 40));
+        int spread = Math.max(1, max - min + 1);
+        int hash = player.getUniqueId() == null ? player.getName().hashCode() : player.getUniqueId().hashCode();
+        return min + Math.abs(hash % spread);
     }
 
     private Field findField(Class<?> type, String name) {
@@ -942,6 +1021,29 @@ public final class BuildFfaIntegration {
         }
     }
 
+    public void sendJoinMessage(Player player) {
+        if (player == null) {
+            return;
+        }
+        String message = getBuildFfaJoinMessage(player);
+        message = ChatColor.translateAlternateColorCodes('&', message.replace("%player%", player.getName()));
+        if (isAvailable()) {
+            try {
+                Class<?> buildFfaClass = Class.forName("rbw.alliancemc.bffa.listeners.BuildFFA");
+                Method send = buildFfaClass.getMethod("sendMessageInBffa", String.class);
+                send.invoke(null, message);
+                return;
+            } catch (Exception ignored) {
+                // Fall back to same-world broadcast below.
+            }
+        }
+        if (player.getWorld() != null) {
+            for (Player viewer : player.getWorld().getPlayers()) {
+                viewer.sendMessage(message);
+            }
+        }
+    }
+
     public void sendDeathMessage(Player victim, Player killer) {
         if (victim == null) {
             return;
@@ -988,6 +1090,16 @@ public final class BuildFfaIntegration {
                 viewer.sendMessage(message);
             }
         }
+    }
+
+    private String getBuildFfaJoinMessage(Player player) {
+        if (isAvailable()) {
+            FileConfiguration cfg = getBuildFfaConfig();
+            if (cfg != null) {
+                return cfg.getString("messages.join-message", "&7[&a+&7] &a%player% &7joined");
+            }
+        }
+        return plugin.getConfig().getString("fight.ffa.bot-join-message", "&7[&a+&7] &a%player% &7joined");
     }
 
     private String getBuildFfaLeaveMessage(Player player) {

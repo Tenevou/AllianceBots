@@ -31,6 +31,8 @@ public class ClipBotTrait extends Trait {
     private boolean running;
     @Persist("attack-other-bots")
     private boolean attackOtherBots;
+    @Persist("target-locked")
+    private boolean targetLocked;
 
     private BotSettings settings;
     private BotState state = BotState.IDLE;
@@ -42,7 +44,12 @@ public class ClipBotTrait extends Trait {
     private long lastDamagerMillis;
     private boolean deathInProgress;
     private int ffaSyncTicks;
+    private int ffaAppearanceSyncTicks;
     private int ffaPassiveHealTicks;
+    private int initialSpawnExitTicks;
+    private boolean ffaJoinAnnounced;
+    private boolean removed;
+    private int lifecycleGeneration;
     private String lastFfaSpawnSignature;
     private ClipBotController clipController;
     private FightBotController fightController;
@@ -53,6 +60,7 @@ public class ClipBotTrait extends Trait {
 
     @Override
     public void onAttach() {
+        removed = false;
         ensureReady();
         configureNpcMetadata();
         AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
@@ -72,6 +80,8 @@ public class ClipBotTrait extends Trait {
 
     @Override
     public void onRemove() {
+        removed = true;
+        cancelPendingRespawn();
         AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
         if (plugin != null && plugin.getBotManager() != null) {
             plugin.getBotManager().unregister(this);
@@ -95,6 +105,7 @@ public class ClipBotTrait extends Trait {
         difficulty = BotDifficulty.parse(key.getString("difficulty", "MEDIUM"));
         debug = key.getBoolean("debug", false);
         attackOtherBots = key.getBoolean("attack-other-bots", false);
+        targetLocked = key.getBoolean("target-locked", false);
         spawnLocation = loadLocation(key.getRelative("spawn"));
         settings.load(key.getRelative("settings"), getDefaultSettings());
         applyModeDefaults(false);
@@ -110,6 +121,7 @@ public class ClipBotTrait extends Trait {
         key.setString("difficulty", difficulty.name());
         key.setBoolean("debug", debug);
         key.setBoolean("attack-other-bots", attackOtherBots);
+        key.setBoolean("target-locked", targetLocked);
         saveLocation(key.getRelative("spawn"), spawnLocation);
         settings.save(key.getRelative("settings"));
     }
@@ -128,23 +140,31 @@ public class ClipBotTrait extends Trait {
     }
 
     public void start() {
-        if (running) {
+        if (removed || running) {
             return;
         }
         if (mode == BotMode.FIGHT) {
             updateFfaSpawn(true);
             if (npc != null && !npc.isSpawned() && spawnLocation != null) {
                 respawn();
+                if (running) {
+                    announceFfaJoin();
+                    Bukkit.getPluginManager().callEvent(new ClipBotStartEvent(this));
+                }
                 return;
             }
         }
         running = true;
         state = BotState.CHASE;
+        beginInitialSpawnExit();
+        announceFfaJoin();
         Bukkit.getPluginManager().callEvent(new ClipBotStartEvent(this));
     }
 
     public void stop(boolean notify) {
-        if (!running && state == BotState.IDLE) {
+        boolean wasActive = running || state != BotState.IDLE || deathInProgress;
+        cancelPendingRespawn();
+        if (!wasActive) {
             return;
         }
         running = false;
@@ -161,8 +181,13 @@ public class ClipBotTrait extends Trait {
     }
 
     public void setTarget(Player target) {
-        UUID oldTarget = targetUuid;
-        targetUuid = target == null ? null : target.getUniqueId();
+        setTargetUuid(target == null ? null : target.getUniqueId());
+    }
+
+    public void setTargetUuid(UUID targetUuid) {
+        UUID oldTarget = this.targetUuid;
+        this.targetUuid = targetUuid;
+        Player target = targetUuid == null ? null : Bukkit.getPlayer(targetUuid);
         Bukkit.getPluginManager().callEvent(new ClipBotTargetChangeEvent(this, oldTarget, target));
     }
 
@@ -192,6 +217,9 @@ public class ClipBotTrait extends Trait {
             return false;
         }
         Player killer = getRecentDamager();
+        if (killer == null) {
+            killer = botPlayer.getKiller();
+        }
         killAndRespawn(botPlayer, killer);
         return true;
     }
@@ -263,9 +291,13 @@ public class ClipBotTrait extends Trait {
             npc.despawn();
         }
         if (settings.isAutoRespawn()) {
+            final int generation = ++lifecycleGeneration;
             Bukkit.getScheduler().runTaskLater(AllianceBotsPlugin.getInstance(), new Runnable() {
                 @Override
                 public void run() {
+                    if (removed || generation != lifecycleGeneration) {
+                        return;
+                    }
                     respawn();
                 }
             }, settings.getRespawnDelayTicks());
@@ -279,7 +311,12 @@ public class ClipBotTrait extends Trait {
     }
 
     public boolean isBuildFfaOnlineLikePlayer() {
-        return mode == BotMode.FIGHT && (running || deathInProgress);
+        return !removed && mode == BotMode.FIGHT && (running || deathInProgress);
+    }
+
+    public void markRemoved() {
+        removed = true;
+        stop(false);
     }
 
     public UUID getTargetUuid() {
@@ -337,6 +374,14 @@ public class ClipBotTrait extends Trait {
         this.attackOtherBots = attackOtherBots;
     }
 
+    public boolean isTargetLocked() {
+        return targetLocked;
+    }
+
+    public void setTargetLocked(boolean targetLocked) {
+        this.targetLocked = targetLocked;
+    }
+
     public Location getSpawnLocation() {
         return spawnLocation == null ? null : spawnLocation.clone();
     }
@@ -347,6 +392,9 @@ public class ClipBotTrait extends Trait {
 
     public void respawn() {
         ensureReady();
+        if (removed || npc == null) {
+            return;
+        }
         if (mode == BotMode.FIGHT) {
             updateFfaSpawn(false);
         }
@@ -371,6 +419,60 @@ public class ClipBotTrait extends Trait {
         deathInProgress = false;
         running = true;
         state = BotState.CHASE;
+        beginInitialSpawnExit();
+    }
+
+    private void cancelPendingRespawn() {
+        lifecycleGeneration++;
+        deathInProgress = false;
+        initialSpawnExitTicks = 0;
+    }
+
+    public boolean isInitialSpawnExitActive() {
+        return mode == BotMode.FIGHT && initialSpawnExitTicks > 0;
+    }
+
+    public void tickInitialSpawnExit() {
+        if (initialSpawnExitTicks > 0) {
+            initialSpawnExitTicks--;
+        }
+    }
+
+    private void beginInitialSpawnExit() {
+        AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
+        if (mode != BotMode.FIGHT || plugin == null) {
+            initialSpawnExitTicks = 0;
+            return;
+        }
+        initialSpawnExitTicks = Math.max(0, plugin.getConfig().getInt("fight.initial-spawn-exit-only-ticks", 45));
+        alignInitialSpawnLook();
+    }
+
+    private void alignInitialSpawnLook() {
+        if (npc == null || !npc.isSpawned() || spawnLocation == null || !(npc.getEntity() instanceof Player)) {
+            return;
+        }
+        Player player = (Player) npc.getEntity();
+        if (spawnLocation.getWorld() == null || !spawnLocation.getWorld().equals(player.getWorld())) {
+            return;
+        }
+        Location look = player.getLocation().clone();
+        look.setYaw(spawnLocation.getYaw());
+        look.setPitch(0.0F);
+        npc.teleport(look, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
+    }
+
+    private void announceFfaJoin() {
+        if (ffaJoinAnnounced || mode != BotMode.FIGHT || npc == null || !npc.isSpawned()
+                || !(npc.getEntity() instanceof Player)) {
+            return;
+        }
+        AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
+        if (plugin == null) {
+            return;
+        }
+        plugin.getBuildFfaIntegration().sendJoinMessage((Player) npc.getEntity());
+        ffaJoinAnnounced = true;
     }
 
     private void syncFfaState() {
@@ -392,11 +494,24 @@ public class ClipBotTrait extends Trait {
             applyLoadout();
         }
         applyPassiveFfaHeal(player, plugin);
+        refreshFfaAppearance(player, plugin);
         if (ffaSyncTicks-- > 0) {
             return;
         }
         ffaSyncTicks = Math.max(1, plugin.getConfig().getInt("fight.ffa.sync-interval-ticks", 5));
         plugin.getBuildFfaIntegration().syncBotHealth(player);
+    }
+
+    private void refreshFfaAppearance(Player player, AllianceBotsPlugin plugin) {
+        if (plugin == null || player == null || !player.isValid()) {
+            return;
+        }
+        if (ffaAppearanceSyncTicks-- > 0) {
+            return;
+        }
+        ffaAppearanceSyncTicks = Math.max(20, plugin.getConfig()
+                .getInt("fight.tab.appearance-refresh-interval-ticks", 40));
+        plugin.getBuildFfaIntegration().refreshBotAppearance(player);
     }
 
     private boolean shouldTeleportToCurrentFfaSpawn(Player player, Location currentSpawn,
@@ -552,7 +667,9 @@ public class ClipBotTrait extends Trait {
         if (listName.length() > 16) {
             listName = listName.substring(0, 16);
         }
-        player.setPlayerListName(listName);
+        String coloredListName = org.bukkit.ChatColor.GRAY + listName;
+        player.setPlayerListName(coloredListName.length() <= 16 ? coloredListName : listName);
+        player.setDisplayName(org.bukkit.ChatColor.GRAY + player.getName());
     }
 
     private void ensureSettings() {

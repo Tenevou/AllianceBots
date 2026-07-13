@@ -9,8 +9,10 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.util.BlockIterator;
 import org.bukkit.util.Vector;
 import ru.alliancemc.alliancebots.AllianceBotsPlugin;
 
@@ -55,9 +57,17 @@ public final class FightBotController {
                 return;
             }
         }
+        if (bot.isInitialSpawnExitActive()) {
+            Entity entity = bot.getNPC().getEntity();
+            if (entity != null) {
+                moveFromSpawn(entity, null);
+            }
+            bot.tickInitialSpawnExit();
+            return;
+        }
 
         Player target = refreshTarget();
-        if (target == null) {
+        if (target == null && !bot.isTargetLocked()) {
             target = findNearestTarget();
         }
         if (target != null && !target.getUniqueId().equals(bot.getTargetUuid())) {
@@ -91,7 +101,7 @@ public final class FightBotController {
 
     public void enterKnockback(Entity damager) {
         cancelTap();
-        if (damager instanceof Player && isValidTarget((Player) damager)) {
+        if (!bot.isTargetLocked() && damager instanceof Player && isValidTarget((Player) damager)) {
             bot.setTarget((Player) damager);
         }
         knockbackController.apply(damager);
@@ -106,7 +116,7 @@ public final class FightBotController {
             return null;
         }
         Player target = bot.getNPC().getEntity().getServer().getPlayer(bot.getTargetUuid());
-        if (!isValidTarget(target)) {
+        if (!isValidTarget(target, getTargetSearchRange(bot.getNPC().getEntity()), bot.isTargetLocked())) {
             return null;
         }
         return target;
@@ -114,6 +124,9 @@ public final class FightBotController {
 
     private Player refreshTarget() {
         Player current = getTarget();
+        if (bot.isTargetLocked()) {
+            return current;
+        }
         if (targetRefreshTicks > 0) {
             targetRefreshTicks--;
             return current;
@@ -176,14 +189,22 @@ public final class FightBotController {
     }
 
     private boolean isValidTarget(Player player, double maxDistance) {
+        return isValidTarget(player, maxDistance, false);
+    }
+
+    private boolean isValidTarget(Player player, double maxDistance, boolean ignoreDistance) {
         Entity entity = bot.getNPC().getEntity();
-        if (player == null || entity == null || !player.isOnline() || player.isDead()) {
+        if (player == null || entity == null || player.isDead()) {
+            return false;
+        }
+        boolean npcTarget = CitizensAPI.getNPCRegistry().isNPC(player);
+        if (!npcTarget && !player.isOnline()) {
             return false;
         }
         if (!isDamageableGameMode(player)) {
             return false;
         }
-        if (CitizensAPI.getNPCRegistry().isNPC(player)) {
+        if (npcTarget) {
             NPC targetNpc = CitizensAPI.getNPCRegistry().getNPC(player);
             if (!bot.isAttackOtherBots() || targetNpc == null || targetNpc == bot.getNPC()
                     || !targetNpc.hasTrait(ClipBotTrait.class)) {
@@ -199,12 +220,19 @@ public final class FightBotController {
         }
         AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
         if (plugin != null) {
+            if (!npcTarget && plugin.getBuildFfaIntegration().isVanished(player)) {
+                return false;
+            }
+            if (npcTarget && plugin.getConfig().getBoolean("fight.bot-vs-bot.ignore-spawn-bots-until-exit", true)
+                    && plugin.getBuildFfaIntegration().isPlayerInSpawn(player)) {
+                return false;
+            }
             if (plugin.getBuildFfaIntegration().isPlayerInSpawn(player)
                     && !canChaseSpawnPlatformTarget(entity, player, plugin)) {
                 return false;
             }
         }
-        return entity.getLocation().distanceSquared(player.getLocation()) <= maxDistance * maxDistance;
+        return ignoreDistance || entity.getLocation().distanceSquared(player.getLocation()) <= maxDistance * maxDistance;
     }
 
     private boolean isDamageableGameMode(Player player) {
@@ -238,6 +266,7 @@ public final class FightBotController {
         double tooCloseDistance = Math.min(bot.getSettings().getTooCloseDistance(), 0.85D);
         double preferredDistance = Math.min(bot.getSettings().getPreferredDistance(), 1.65D);
         configureNavigator(navigator, preferredDistance);
+        boolean blockedLineOfSight = entity instanceof Player && !hasClearPathSight((Player) entity, target);
 
         if (distance <= tooCloseDistance) {
             navigator.cancelNavigation();
@@ -251,7 +280,7 @@ public final class FightBotController {
             }
             bot.setState(BotState.CHASE);
         } else if (distance > preferredDistance) {
-            if (shouldUsePathfinder(entity, target)) {
+            if (shouldUsePathfinder(entity, target, blockedLineOfSight)) {
                 if (pathRetargetCooldown-- <= 0 || !navigator.isNavigating()) {
                     navigator.setPaused(false);
                     navigator.setTarget(target, false);
@@ -269,7 +298,9 @@ public final class FightBotController {
             navigator.cancelNavigation();
         }
 
-        applyStrafe(target);
+        if (!blockedLineOfSight) {
+            applyStrafe(target);
+        }
         maybeJump(entity, target, distance);
         if (entity instanceof Player) {
             setSprinting((Player) entity, true);
@@ -283,7 +314,7 @@ public final class FightBotController {
             return false;
         }
         Navigator navigator = bot.getNPC().getNavigator();
-        if (target != null && shouldUseSpawnPathfinder(entity, target)) {
+        if (target != null && !shouldIgnoreSpawnBotTarget(entity, target, plugin) && shouldUseSpawnPathfinder(entity, target)) {
             configureNavigator(navigator, Math.min(bot.getSettings().getPreferredDistance(), 1.65D));
             if (pathRetargetCooldown-- <= 0 || !navigator.isNavigating()) {
                 navigator.cancelNavigation();
@@ -299,19 +330,22 @@ public final class FightBotController {
         navigator.setPaused(false);
 
         Vector direction;
-        if (target != null) {
+        if (target != null && !shouldIgnoreSpawnBotTarget(entity, target, plugin)) {
             direction = target.getLocation().toVector().subtract(entity.getLocation().toVector());
         } else {
-            direction = entity.getLocation().getDirection();
+            direction = getSpawnForwardDirection(entity);
+            direction.add(spawnExitSpread());
         }
         direction.setY(0.0D);
         if (direction.lengthSquared() < 0.0001D) {
-            direction = entity.getLocation().getDirection();
+            direction = getSpawnForwardDirection(entity);
             direction.setY(0.0D);
         }
         if (direction.lengthSquared() < 0.0001D) {
             return false;
         }
+
+        rotationController.lookAtDirection(direction, false);
 
         double speed = plugin.getConfig().getDouble("fight.spawn-exit-speed", 0.32D);
         double max = plugin.getConfig().getDouble("fight.spawn-exit-max-horizontal-speed", 0.42D);
@@ -330,6 +364,34 @@ public final class FightBotController {
         return true;
     }
 
+    private Vector getSpawnForwardDirection(Entity entity) {
+        Location spawn = bot.getSpawnLocation();
+        if (spawn != null && spawn.getWorld() != null && entity != null
+                && spawn.getWorld().equals(entity.getWorld())) {
+            return spawn.getDirection();
+        }
+        return entity == null ? new Vector(0.0D, 0.0D, 1.0D) : entity.getLocation().getDirection();
+    }
+
+    private boolean shouldIgnoreSpawnBotTarget(Entity entity, Player target, AllianceBotsPlugin plugin) {
+        if (plugin == null || target == null || !bot.isAttackOtherBots()
+                || !CitizensAPI.getNPCRegistry().isNPC(target)) {
+            return false;
+        }
+        return entity instanceof Player
+                && plugin.getBuildFfaIntegration().isPlayerInSpawn((Player) entity)
+                && plugin.getBuildFfaIntegration().isPlayerInSpawn(target)
+                && plugin.getConfig().getBoolean("fight.bot-vs-bot.ignore-spawn-bots-until-exit", true);
+    }
+
+    private Vector spawnExitSpread() {
+        int seed = bot.getNPC() == null ? random.nextInt(360) : bot.getNPC().getId() * 47;
+        double angle = Math.toRadians(seed % 360);
+        double strength = AllianceBotsPlugin.getInstance().getConfig()
+                .getDouble("fight.bot-vs-bot.spawn-exit-spread", 0.18D);
+        return new Vector(Math.cos(angle) * strength, 0.0D, Math.sin(angle) * strength);
+    }
+
     private void configureNavigator(Navigator navigator, double distanceMargin) {
         float speed = (float) bot.getSettings().getMovementSpeed();
         navigator.getLocalParameters()
@@ -346,10 +408,14 @@ public final class FightBotController {
                                 .getDouble("fight.navigation.platform-target-detect-range", 96.0D)));
     }
 
-    private boolean shouldUsePathfinder(Entity entity, Player target) {
+    private boolean shouldUsePathfinder(Entity entity, Player target, boolean blockedLineOfSight) {
         AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
         if (plugin == null || !plugin.getConfig().getBoolean("fight.navigation.use-pathfinder-for-platforms", true)) {
             return false;
+        }
+        if (blockedLineOfSight && plugin.getConfig()
+                .getBoolean("fight.navigation.pathfinder-when-line-of-sight-blocked", true)) {
+            return true;
         }
         double yDifference = Math.abs(target.getLocation().getY() - entity.getLocation().getY());
         double threshold = plugin.getConfig().getDouble("fight.navigation.platform-y-threshold", 1.35D);
@@ -358,7 +424,54 @@ public final class FightBotController {
         }
         return entity instanceof Player
                 && target.getLocation().getBlockY() > entity.getLocation().getBlockY()
-                && !((Player) entity).hasLineOfSight(target);
+                && !hasClearPathSight((Player) entity, target);
+    }
+
+    private boolean hasClearPathSight(Player player, Player target) {
+        if (player == null || target == null || !player.getWorld().equals(target.getWorld())) {
+            return false;
+        }
+        if (!player.hasLineOfSight(target)) {
+            return false;
+        }
+        Location start = player.getEyeLocation();
+        Location head = target.getEyeLocation();
+        Location body = target.getLocation().clone().add(0.0D, target.getEyeHeight() * 0.55D, 0.0D);
+        return hasClearRay(start, head) || hasClearRay(start, body);
+    }
+
+    private boolean hasClearRay(Location start, Location end) {
+        if (start == null || end == null || start.getWorld() == null
+                || !start.getWorld().equals(end.getWorld())) {
+            return false;
+        }
+        Vector between = end.toVector().subtract(start.toVector());
+        double distance = between.length();
+        if (distance < 0.001D) {
+            return true;
+        }
+        BlockIterator iterator = new BlockIterator(start.getWorld(), start.toVector(), between.normalize(),
+                0.0D, (int) Math.ceil(distance));
+        while (iterator.hasNext()) {
+            Block block = iterator.next();
+            if (isSameBlock(block, start)) {
+                continue;
+            }
+            if (isSameBlock(block, end)) {
+                return true;
+            }
+            if (block.getType() != Material.AIR && block.getType().isSolid()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isSameBlock(Block block, Location location) {
+        return block != null && location != null
+                && block.getX() == location.getBlockX()
+                && block.getY() == location.getBlockY()
+                && block.getZ() == location.getBlockZ();
     }
 
     private boolean shouldUseSpawnPathfinder(Entity entity, Player target) {

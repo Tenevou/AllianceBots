@@ -38,6 +38,29 @@ public final class RotationController {
         setRotation(entity, yaw, pitch);
     }
 
+    public void lookAtDirection(Vector direction, boolean smooth) {
+        Entity entity = bot.getNPC().getEntity();
+        if (!(entity instanceof Player) || direction == null) {
+            return;
+        }
+        Vector horizontal = direction.clone();
+        horizontal.setY(0.0D);
+        if (horizontal.lengthSquared() < 0.0001) {
+            return;
+        }
+
+        float targetYaw = yawFromDirection(horizontal);
+        float targetPitch = 0.0F;
+        float yaw = targetYaw;
+        float pitch = targetPitch;
+        if (smooth && bot.getSettings().isSmoothRotation()) {
+            Location current = entity.getLocation();
+            yaw = approachAngle(current.getYaw(), targetYaw, (float) bot.getSettings().getMaxYawChangePerTick());
+            pitch = approachAngle(current.getPitch(), targetPitch, (float) bot.getSettings().getMaxPitchChangePerTick());
+        }
+        setRotation(entity, yaw, pitch);
+    }
+
     private float yawFromDirection(Vector direction) {
         return (float) Math.toDegrees(Math.atan2(-direction.getX(), direction.getZ()));
     }

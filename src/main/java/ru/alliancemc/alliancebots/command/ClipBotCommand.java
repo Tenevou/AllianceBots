@@ -2,11 +2,14 @@ package ru.alliancemc.alliancebots.command;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import net.citizensnpcs.api.CitizensAPI;
 import net.citizensnpcs.api.npc.NPC;
@@ -27,8 +30,9 @@ import ru.alliancemc.alliancebots.message.MessageService;
 
 public final class ClipBotCommand implements CommandExecutor, TabCompleter {
     private static final List<String> ROOT = Arrays.asList(
-            "create", "remove", "removeall", "mass", "spawnmany", "select", "target", "start", "stop", "teleport",
-            "info", "list", "reload", "set", "mode", "difficulty", "setspawn", "respawn", "reset", "debug");
+            "create", "remove", "removeall", "mass", "spawnmany", "hunt", "masshunt", "select", "target",
+            "start", "stop", "teleport", "info", "list", "reload", "set", "mode", "difficulty", "strength",
+            "power", "setspawn", "respawn", "reset", "debug");
     private static final List<String> SET = Arrays.asList(
             "swingrange", "hitrange", "cpsmin", "cpsmax", "speed", "damage",
             "preferred-distance", "too-close-distance", "knockback-mode", "knockback-horizontal",
@@ -37,6 +41,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
     private final AllianceBotsPlugin plugin;
     private final Map<String, UUID> selected = new LinkedHashMap<String, UUID>();
     private final Random random = new Random();
+    private int massQueueGeneration;
 
     public ClipBotCommand(AllianceBotsPlugin plugin) {
         this.plugin = plugin;
@@ -57,6 +62,8 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             removeAll(sender);
         } else if ("mass".equals(sub) || "spawnmany".equals(sub)) {
             mass(sender, args);
+        } else if ("hunt".equals(sub) || "masshunt".equals(sub)) {
+            hunt(sender, args);
         } else if ("select".equals(sub)) {
             select(sender, args);
         } else if ("target".equals(sub)) {
@@ -77,7 +84,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             set(sender, args);
         } else if ("mode".equals(sub)) {
             mode(sender, args);
-        } else if ("difficulty".equals(sub)) {
+        } else if ("difficulty".equals(sub) || "strength".equals(sub) || "power".equals(sub)) {
             difficulty(sender, args);
         } else if ("setspawn".equals(sub)) {
             setSpawn(sender, args);
@@ -103,7 +110,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             msg().send(sender, "&cBot limit reached.");
             return;
         }
-        String name = args.length >= 2 ? args[1] : nextRandomBotName();
+        String name = args.length >= 2 ? args[1] : nextUniqueBotName();
         NPC npc = createBot(uniqueBotName(name), ((Player) sender).getLocation());
         select(sender, npc);
         CitizensAPI.getNPCRegistry().saveToStore();
@@ -134,6 +141,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         if (!has(sender, "alliancebots.create")) {
             return;
         }
+        massQueueGeneration++;
         List<NPC> bots = new ArrayList<NPC>();
         for (NPC npc : CitizensAPI.getNPCRegistry()) {
             if (npc.hasTrait(ClipBotTrait.class)) {
@@ -143,9 +151,11 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         for (NPC npc : bots) {
             destroyBot(npc, sender, true);
         }
+        int orphans = cleanupOrphanBots(sender);
         CitizensAPI.getNPCRegistry().saveToStore();
         plugin.getProxyBridgeService().sendUpdate();
-        msg().send(sender, "&aRemoved &e" + bots.size() + " &aclip bots.");
+        msg().send(sender, "&aRemoved &e" + bots.size() + " &aclip bots"
+                + (orphans > 0 ? " &aand &e" + orphans + " &aorphan bot entities" : "") + "&a.");
     }
 
     private void mass(CommandSender sender, String[] args) {
@@ -153,19 +163,54 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             return;
         }
         if (args.length < 4) {
-            msg().send(sender, "&cUsage: /bot mass <count> <bot-vs-bot:true|false> <minutes>");
+            msg().send(sender, "&cUsage: /bot mass <count> <bot-vs-bot:true|false> <minutes> [easy|medium|hard] [join-interval-minutes]");
             return;
         }
         int count;
         int minutes;
+        MassOptions options;
         try {
             count = parsePositiveInt(args[1]);
             minutes = parsePositiveInt(args[3]);
+            options = parseSpawnOptions(args, 4, BotDifficulty.HARD, 0, parseBoolean(args[2]), false);
         } catch (IllegalArgumentException ex) {
             msg().send(sender, "&c" + ex.getMessage());
             return;
         }
-        boolean botVsBot = parseBoolean(args[2]);
+        spawnMassGroup(sender, count, options.botVsBot, minutes, options.joinIntervalMinutes,
+                options.difficulty, null, null, false);
+    }
+
+    private void hunt(CommandSender sender, String[] args) {
+        if (!has(sender, "alliancebots.create")) {
+            return;
+        }
+        if (args.length < 4) {
+            msg().send(sender, "&cUsage: /bot hunt <player> <count> <minutes> [easy|medium|hard] [join-interval-minutes] [bot-vs-bot:true|false]");
+            return;
+        }
+        Player target = Bukkit.getPlayerExact(args[1]);
+        if (target == null || !target.isOnline()) {
+            msg().send(sender, "&cPlayer is not online.");
+            return;
+        }
+        int count;
+        int minutes;
+        MassOptions options;
+        try {
+            count = parsePositiveInt(args[2]);
+            minutes = parsePositiveInt(args[3]);
+            options = parseSpawnOptions(args, 4, BotDifficulty.HARD, 0, false, true);
+        } catch (IllegalArgumentException ex) {
+            msg().send(sender, "&c" + ex.getMessage());
+            return;
+        }
+        spawnMassGroup(sender, count, options.botVsBot, minutes, options.joinIntervalMinutes,
+                options.difficulty, target.getUniqueId(), target.getName(), true);
+    }
+
+    private void spawnMassGroup(CommandSender sender, int count, boolean botVsBot, int minutes, int joinIntervalMinutes,
+                                BotDifficulty difficulty, UUID targetUuid, String targetName, boolean lockedTarget) {
         int available = plugin.getMaximumBots() - plugin.getBotManager().count();
         if (count > available) {
             msg().send(sender, "&cBot limit reached. Available slots: " + Math.max(0, available) + ".");
@@ -180,22 +225,53 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
-        List<NPC> created = new ArrayList<NPC>();
-        for (int i = 0; i < count; i++) {
-            NPC npc = createBot(uniqueBotName(nextRandomBotName()), spawn);
-            ClipBotTrait bot = npc.getTrait(ClipBotTrait.class);
-            bot.setMode(BotMode.FIGHT);
-            bot.setDifficulty(BotDifficulty.HARD);
-            bot.setAttackOtherBots(botVsBot);
-            bot.setSpawnLocation(spawn);
-            bot.start();
-            created.add(npc);
+        final List<String> reservedNames = reserveUniqueBotNames(count);
+        final BotDifficulty difficultyCopy = difficulty == null ? BotDifficulty.HARD : difficulty;
+        final UUID targetUuidCopy = targetUuid;
+        final boolean lockedTargetCopy = lockedTarget;
+        String targetPart = targetName == null ? "" : " Target: &e" + targetName + "&a.";
+        if (joinIntervalMinutes <= 0) {
+            List<NPC> created = new ArrayList<NPC>();
+            for (int i = 0; i < count; i++) {
+                created.add(spawnMassBot(spawn, botVsBot, reservedNames.get(i), difficultyCopy,
+                        targetUuidCopy, lockedTargetCopy));
+            }
+            CitizensAPI.getNPCRegistry().saveToStore();
+            plugin.getProxyBridgeService().sendUpdate();
+            scheduleGradualRemoval(created, minutes);
+            msg().send(sender, "&aSpawned &e" + created.size() + " &a" + difficultyCopy.name()
+                    + " FIGHT bots for &e" + minutes + " &amin. Bot-vs-bot: &e" + botVsBot
+                    + "&a." + targetPart);
+            return;
         }
-        CitizensAPI.getNPCRegistry().saveToStore();
-        plugin.getProxyBridgeService().sendUpdate();
-        scheduleGradualRemoval(created, minutes);
-        msg().send(sender, "&aSpawned &e" + created.size() + " &aHARD FIGHT bots for &e" + minutes
-                + " &amin. Bot-vs-bot: &e" + botVsBot + "&a.");
+
+        final int queueGeneration = massQueueGeneration;
+        for (int i = 0; i < count; i++) {
+            final int index = i;
+            final Location spawnCopy = spawn.clone();
+            final boolean botVsBotCopy = botVsBot;
+            final int minutesCopy = minutes;
+            final String nameCopy = reservedNames.get(i);
+            plugin.getServer().getScheduler().runTaskLater(plugin, new Runnable() {
+                @Override
+                public void run() {
+                    if (queueGeneration != massQueueGeneration) {
+                        return;
+                    }
+                    if (plugin.getBotManager().count() >= plugin.getMaximumBots()) {
+                        return;
+                    }
+                    NPC npc = spawnMassBot(spawnCopy, botVsBotCopy, nameCopy, difficultyCopy,
+                            targetUuidCopy, lockedTargetCopy);
+                    CitizensAPI.getNPCRegistry().saveToStore();
+                    plugin.getProxyBridgeService().sendUpdate();
+                    scheduleGradualRemoval(Arrays.asList(npc), minutesCopy);
+                }
+            }, (long) index * joinIntervalMinutes * 60L * 20L);
+        }
+        msg().send(sender, "&aQueued &e" + count + " &a" + difficultyCopy.name() + " FIGHT bots for &e" + minutes
+                + " &amin. Join interval: &e" + joinIntervalMinutes + " min&a. Bot-vs-bot: &e"
+                + botVsBot + "&a." + targetPart);
     }
 
     private NPC createBot(String name, Location location) {
@@ -205,16 +281,36 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         return npc;
     }
 
+    private NPC spawnMassBot(Location spawn, boolean botVsBot, String name, BotDifficulty difficulty,
+                             UUID targetUuid, boolean lockedTarget) {
+        NPC npc = createBot(uniqueBotName(name), spawn);
+        ClipBotTrait bot = npc.getTrait(ClipBotTrait.class);
+        bot.setMode(BotMode.FIGHT);
+        bot.setDifficulty(difficulty == null ? BotDifficulty.HARD : difficulty);
+        bot.setAttackOtherBots(botVsBot);
+        bot.setTargetLocked(lockedTarget);
+        if (targetUuid != null) {
+            bot.setTargetUuid(targetUuid);
+        }
+        bot.setSpawnLocation(spawn);
+        bot.start();
+        return npc;
+    }
+
     private void scheduleGradualRemoval(final List<NPC> bots, int minutes) {
         long baseDelay = Math.max(1, minutes) * 60L * 20L;
         int minStagger = Math.max(1, plugin.getConfig().getInt("mass.leave-stagger-min-ticks", 20));
         int maxStagger = Math.max(minStagger, plugin.getConfig().getInt("mass.leave-stagger-max-ticks", 70));
+        final int removalGeneration = massQueueGeneration;
         long offset = 0L;
         for (final NPC npc : bots) {
             offset += minStagger + random.nextInt(Math.max(1, maxStagger - minStagger + 1));
             plugin.getServer().getScheduler().runTaskLater(plugin, new Runnable() {
                 @Override
                 public void run() {
+                    if (removalGeneration != massQueueGeneration) {
+                        return;
+                    }
                     if (npc != null && npc.hasTrait(ClipBotTrait.class)) {
                         destroyBot(npc, Bukkit.getConsoleSender(), true);
                         CitizensAPI.getNPCRegistry().saveToStore();
@@ -234,8 +330,107 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
                 && bot.getMode() == BotMode.FIGHT) {
             plugin.getBuildFfaIntegration().sendLeaveMessage((Player) npc.getEntity());
         }
-        bot.stop(false);
+        bot.markRemoved();
         npc.destroy(sender == null ? Bukkit.getConsoleSender() : sender);
+    }
+
+    private int cleanupOrphanBots(CommandSender sender) {
+        int removed = 0;
+        CommandSender source = sender == null ? Bukkit.getConsoleSender() : sender;
+        List<NPC> orphanNpcs = new ArrayList<NPC>();
+        for (NPC npc : CitizensAPI.getNPCRegistry()) {
+            if (npc.hasTrait(ClipBotTrait.class)) {
+                continue;
+            }
+            if (isAllianceBotNpc(npc)) {
+                orphanNpcs.add(npc);
+            }
+        }
+        for (NPC npc : orphanNpcs) {
+            npc.destroy(source);
+            removed++;
+        }
+        List<Player> orphanPlayers = new ArrayList<Player>();
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (!isAllianceBotOrphanPlayer(player)) {
+                continue;
+            }
+            orphanPlayers.add(player);
+        }
+        for (Player player : orphanPlayers) {
+            NPC npc = CitizensAPI.getNPCRegistry().getNPC(player);
+            if (npc != null) {
+                npc.destroy(source);
+            } else {
+                player.remove();
+            }
+            removed++;
+        }
+        return removed;
+    }
+
+    private boolean isAllianceBotNpc(NPC npc) {
+        if (npc == null || npc.hasTrait(ClipBotTrait.class)) {
+            return false;
+        }
+        if (npc.isSpawned() && npc.getEntity() instanceof Player
+                && isAllianceBotOrphanPlayer((Player) npc.getEntity())) {
+            return true;
+        }
+        Location stored = npc.getStoredLocation();
+        return stored != null && stored.getWorld() != null
+                && plugin.getBuildFfaIntegration().isFfaWorld(stored.getWorld())
+                && looksLikeGeneratedBotName(npc.getName());
+    }
+
+    private boolean isAllianceBotOrphanPlayer(Player player) {
+        if (player == null || !isLikelyNpc(player)) {
+            return false;
+        }
+        NPC npc = CitizensAPI.getNPCRegistry().getNPC(player);
+        if (npc != null && npc.hasTrait(ClipBotTrait.class)) {
+            return false;
+        }
+        if (player.hasMetadata("alliancebots") || player.hasMetadata("AllianceBotsNPC")) {
+            return true;
+        }
+        return player.getWorld() != null
+                && plugin.getBuildFfaIntegration().isFfaWorld(player.getWorld())
+                && isLikelyNpc(player)
+                && looksLikeGeneratedBotName(player.getName());
+    }
+
+    private boolean isLikelyNpc(Player player) {
+        return CitizensAPI.getNPCRegistry().isNPC(player)
+                || player.hasMetadata("NPC")
+                || player.hasMetadata("CitizensNPC")
+                || player.hasMetadata("AllianceBotsNPC")
+                || player.hasMetadata("alliancebots");
+    }
+
+    private boolean looksLikeGeneratedBotName(String name) {
+        if (name == null || name.length() == 0) {
+            return false;
+        }
+        String base = stripTrailingDigits(sanitizeBotName(name)).toLowerCase(Locale.ENGLISH);
+        for (String configured : getRandomNamePool()) {
+            String candidate = stripTrailingDigits(sanitizeBotName(configured)).toLowerCase(Locale.ENGLISH);
+            if (base.equals(candidate)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String stripTrailingDigits(String value) {
+        if (value == null) {
+            return "";
+        }
+        int end = value.length();
+        while (end > 0 && Character.isDigit(value.charAt(end - 1))) {
+            end--;
+        }
+        return value.substring(0, end);
     }
 
     private void select(CommandSender sender, String[] args) {
@@ -340,7 +535,8 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         msg().send(sender, "&6NPC: &e" + bot.getNPC().getName() + " &7(id " + bot.getNPC().getId() + ")");
         msg().send(sender, "&6Mode: &e" + bot.getMode() + " &6Difficulty: &e" + bot.getDifficulty());
         msg().send(sender, "&6State: &e" + bot.getState() + " &6Running: &e" + bot.isRunning());
-        msg().send(sender, "&6Target UUID: &e" + (bot.getTargetUuid() == null ? "none" : bot.getTargetUuid().toString()));
+        msg().send(sender, "&6Target UUID: &e" + (bot.getTargetUuid() == null ? "none" : bot.getTargetUuid().toString())
+                + " &6Locked: &e" + bot.isTargetLocked());
         msg().send(sender, "&6Ranges: &eswing " + settings.getSwingRange() + " hit " + settings.getHitRange());
         msg().send(sender, "&6CPS: &e" + settings.getCpsMin() + "-" + settings.getCpsMax()
                 + " &6Speed: &e" + settings.getMovementSpeed() + " &6Damage: &e" + settings.getDamage());
@@ -543,6 +739,88 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         return parsed;
     }
 
+    private MassOptions parseSpawnOptions(String[] args, int startIndex, BotDifficulty defaultDifficulty,
+                                          int defaultJoinIntervalMinutes, boolean defaultBotVsBot,
+                                          boolean allowBotVsBotOption) {
+        MassOptions options = new MassOptions();
+        options.difficulty = defaultDifficulty == null ? BotDifficulty.HARD : defaultDifficulty;
+        options.joinIntervalMinutes = defaultJoinIntervalMinutes;
+        options.botVsBot = defaultBotVsBot;
+        boolean difficultySet = false;
+        boolean joinIntervalSet = defaultJoinIntervalMinutes > 0;
+        boolean botVsBotSet = false;
+        for (int i = startIndex; i < args.length; i++) {
+            String token = args[i];
+            BotDifficulty difficulty = parseDifficultyToken(token);
+            if (difficulty != null) {
+                if (difficultySet) {
+                    throw new IllegalArgumentException("Difficulty is already set.");
+                }
+                options.difficulty = difficulty;
+                difficultySet = true;
+                continue;
+            }
+            if (allowBotVsBotOption && isBooleanToken(token)) {
+                if (botVsBotSet) {
+                    throw new IllegalArgumentException("Bot-vs-bot option is already set.");
+                }
+                options.botVsBot = parseBoolean(token);
+                botVsBotSet = true;
+                continue;
+            }
+            if (isIntegerToken(token)) {
+                if (joinIntervalSet) {
+                    throw new IllegalArgumentException("Join interval is already set.");
+                }
+                options.joinIntervalMinutes = parsePositiveInt(token);
+                joinIntervalSet = true;
+                continue;
+            }
+            throw new IllegalArgumentException("Unknown spawn option: " + token + ".");
+        }
+        return options;
+    }
+
+    private BotDifficulty parseDifficultyToken(String value) {
+        if ("easy".equalsIgnoreCase(value)) {
+            return BotDifficulty.EASY;
+        }
+        if ("medium".equalsIgnoreCase(value)) {
+            return BotDifficulty.MEDIUM;
+        }
+        if ("hard".equalsIgnoreCase(value)) {
+            return BotDifficulty.HARD;
+        }
+        return null;
+    }
+
+    private boolean isIntegerToken(String value) {
+        if (value == null || value.length() == 0) {
+            return false;
+        }
+        int start = value.charAt(0) == '-' ? 1 : 0;
+        if (start >= value.length()) {
+            return false;
+        }
+        for (int i = start; i < value.length(); i++) {
+            if (!Character.isDigit(value.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isBooleanToken(String value) {
+        return "true".equalsIgnoreCase(value)
+                || "false".equalsIgnoreCase(value)
+                || "yes".equalsIgnoreCase(value)
+                || "no".equalsIgnoreCase(value)
+                || "on".equalsIgnoreCase(value)
+                || "off".equalsIgnoreCase(value)
+                || "1".equals(value)
+                || "0".equals(value);
+    }
+
     private boolean parseBoolean(String value) {
         return "true".equalsIgnoreCase(value)
                 || "yes".equalsIgnoreCase(value)
@@ -551,20 +829,62 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
                 || "да".equalsIgnoreCase(value);
     }
 
-    private String nextRandomBotName() {
+    private String nextUniqueBotName() {
+        return reserveUniqueBotNames(1).get(0);
+    }
+
+    private List<String> reserveUniqueBotNames(int count) {
+        Set<String> reserved = new HashSet<String>();
+        List<String> result = new ArrayList<String>();
+        List<String> names = new ArrayList<String>(getRandomNamePool());
+        Collections.shuffle(names, random);
+        for (String name : names) {
+            if (result.size() >= count) {
+                break;
+            }
+            String candidate = uniqueBotName(name, reserved);
+            String lower = candidate.toLowerCase(Locale.ENGLISH);
+            if (reserved.contains(lower)) {
+                continue;
+            }
+            reserved.add(lower);
+            result.add(candidate);
+        }
+        int fallback = 0;
+        while (result.size() < count) {
+            String candidate = uniqueBotName(generateFallbackName(fallback++), reserved);
+            reserved.add(candidate.toLowerCase(Locale.ENGLISH));
+            result.add(candidate);
+        }
+        return result;
+    }
+
+    private List<String> getRandomNamePool() {
         List<String> names = plugin.getConfig().getStringList("random-names");
         if (names == null || names.isEmpty()) {
             names = Arrays.asList(
-                    "Artyom", "Artem", "Andrey", "Anton", "Daniil", "Danil", "Denis", "Dima",
-                    "Dimon", "Egor", "Gleb", "Ilya", "Ivan", "Kirill", "Kostya", "Maksim",
-                    "Matvey", "Misha", "Nikita", "Oleg", "Pavel", "Roma", "Roman", "Ruslan",
-                    "Sasha", "Sergey", "Timur", "Vadim", "Vladik", "Vlad", "Yarik", "Zhenya",
-                    "qMisha", "xNikita", "zKirill", "DaniilYT", "RomaPvP", "IlyaPlay", "JustArtem");
+                    "reliq", "virex", "Kavox", "melyq", "Neyro", "xSainz", "qDeyro", "Lunex",
+                    "vMoris", "Aqven", "zRiley", "Nexiq", "Tayro", "xKaven", "Ravix", "yMiro",
+                    "qVlade", "Drezix", "Laynq", "Selyx", "Kirox", "Nerqo", "Mavix", "Vendy",
+                    "zNexy", "Raynq", "wexin", "qNiko", "Morix", "Aroxy", "Ryven", "Limor");
         }
-        return names.get(random.nextInt(names.size()));
+        return names;
+    }
+
+    private String generateFallbackName(int salt) {
+        String[] left = {"x", "q", "z", "v", "i", "n", "r", "m"};
+        String[] mid = {"aer", "ven", "lyx", "mir", "kro", "sai", "rex", "nox", "dyl", "ray"};
+        String[] right = {"q", "x", "yy", "ex", "io", "on", "ix", "er"};
+        return left[(salt + random.nextInt(left.length)) % left.length]
+                + mid[(salt * 3 + random.nextInt(mid.length)) % mid.length]
+                + right[(salt * 7 + random.nextInt(right.length)) % right.length];
     }
 
     private String uniqueBotName(String desired) {
+        return uniqueBotName(desired, new HashSet<String>());
+    }
+
+    private String uniqueBotName(String desired, Set<String> reserved) {
         String base = sanitizeBotName(desired);
         if (base.length() == 0) {
             base = "Bot";
@@ -574,18 +894,22 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         if (base.length() > max) {
             base = base.substring(0, max);
         }
-        if (!nameExists(base)) {
+        if (!nameReservedOrExists(base, reserved)) {
             return base;
         }
         for (int i = 1; i < 1000; i++) {
             String suffix = String.valueOf(i);
             int trim = Math.max(1, max - suffix.length());
             String candidate = base.substring(0, Math.min(base.length(), trim)) + suffix;
-            if (!nameExists(candidate)) {
+            if (!nameReservedOrExists(candidate, reserved)) {
                 return candidate;
             }
         }
         return "Bot" + System.currentTimeMillis() % 100000L;
+    }
+
+    private boolean nameReservedOrExists(String name, Set<String> reserved) {
+        return reserved.contains(name.toLowerCase(Locale.ENGLISH)) || nameExists(name);
     }
 
     private String sanitizeBotName(String name) {
@@ -664,7 +988,8 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
     }
 
     private void help(CommandSender sender) {
-        msg().send(sender, "&e/clipbot create [name] &7| &e/bot mass <count> <bot-vs-bot:true|false> <minutes>");
+        msg().send(sender, "&e/clipbot create [name] &7| &e/bot mass <count> <bot-vs-bot:true|false> <minutes> [difficulty] [join-interval-minutes]");
+        msg().send(sender, "&e/bot hunt <player> <count> <minutes> [difficulty] [join-interval-minutes] [bot-vs-bot]");
         msg().send(sender, "&e/clipbot remove <name> &7| &e/bot removeall");
         msg().send(sender, "&e/clipbot select <name> &7| &e/clipbot target <player>");
         msg().send(sender, "&e/clipbot start &7| &e/clipbot stop &7| &e/clipbot teleport");
@@ -703,6 +1028,29 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             if (args.length == 4) {
                 return startsWith(Arrays.asList("1", "5", "10", "30"), args[3]);
             }
+            if (args.length == 5 || args.length == 6) {
+                return startsWith(Arrays.asList("easy", "medium", "hard", "1", "2", "5", "10"), args[args.length - 1]);
+            }
+            return new ArrayList<String>();
+        }
+        if ("hunt".equalsIgnoreCase(args[0]) || "masshunt".equalsIgnoreCase(args[0])) {
+            if (args.length == 2) {
+                List<String> names = new ArrayList<String>();
+                for (Player player : Bukkit.getOnlinePlayers()) {
+                    names.add(player.getName());
+                }
+                return startsWith(names, args[1]);
+            }
+            if (args.length == 3) {
+                return startsWith(Arrays.asList("1", "3", "5", "10", "20"), args[2]);
+            }
+            if (args.length == 4) {
+                return startsWith(Arrays.asList("1", "5", "10", "30"), args[3]);
+            }
+            if (args.length >= 5 && args.length <= 7) {
+                return startsWith(Arrays.asList("easy", "medium", "hard", "1", "2", "5", "10", "false", "true"),
+                        args[args.length - 1]);
+            }
             return new ArrayList<String>();
         }
         if (args.length == 2 && ("set".equalsIgnoreCase(args[0]))) {
@@ -727,7 +1075,8 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         if (args.length == 3 && "mode".equalsIgnoreCase(args[0])) {
             return startsWith(Arrays.asList("clip", "fight"), args[2]);
         }
-        if (args.length == 2 && "difficulty".equalsIgnoreCase(args[0])) {
+        if (args.length == 2 && ("difficulty".equalsIgnoreCase(args[0])
+                || "strength".equalsIgnoreCase(args[0]) || "power".equalsIgnoreCase(args[0]))) {
             List<String> values = new ArrayList<String>();
             values.add("easy");
             values.add("medium");
@@ -735,7 +1084,8 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             values.addAll(botNames());
             return startsWith(values, args[1]);
         }
-        if (args.length == 3 && "difficulty".equalsIgnoreCase(args[0])) {
+        if (args.length == 3 && ("difficulty".equalsIgnoreCase(args[0])
+                || "strength".equalsIgnoreCase(args[0]) || "power".equalsIgnoreCase(args[0]))) {
             return startsWith(Arrays.asList("easy", "medium", "hard"), args[2]);
         }
         if (args.length == 2 && "debug".equalsIgnoreCase(args[0])) {
@@ -807,5 +1157,11 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             }
         }
         return result;
+    }
+
+    private static final class MassOptions {
+        private BotDifficulty difficulty;
+        private int joinIntervalMinutes;
+        private boolean botVsBot;
     }
 }

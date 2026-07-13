@@ -35,6 +35,10 @@ defaults:
     target-lost-timeout-ticks: 100
 
 fight:
+  bot-vs-bot:
+    ignore-spawn-bots-until-exit: true
+    spawn-exit-spread: 0.18
+
   ffa:
     use-buildffa-spawn: true
     follow-current-map-spawn: true
@@ -53,6 +57,7 @@ fight:
       satiated-interval-ticks: 60
       peaceful-interval-ticks: 20
     integrate-buildffa-stats: true
+    bot-join-message: "&7[&a+&7] &a%player% &7joined"
     bot-death-message: "&a%victim% &fwas killed by &a%attacker%"
     bot-leave-message: "&7[&a-&7] &a%player% &7left"
   tab:
@@ -61,6 +66,7 @@ fight:
     force-player-list-entry: true
     world-scoped-player-list: true
     visibility-sync-interval-ticks: 40
+    appearance-refresh-interval-ticks: 40
     force-scoreboard-fallback: true
     scoreboard-team-name: ab_bot
     nametag-prefix: "&7"
@@ -70,9 +76,13 @@ fight:
     plain-player-list-suffix: " [0]"
     fallback-scoreboard-prefix: "&7"
     fallback-scoreboard-suffix: "&7 [0]"
+    ping:
+      min: 5
+      max: 40
     debug: false
   navigation:
     use-pathfinder-for-platforms: true
+    pathfinder-when-line-of-sight-blocked: true
     chase-spawn-platform-targets: true
     platform-target-detect-range: 96.0
     platform-y-threshold: 1.35
@@ -82,6 +92,7 @@ fight:
     stationary-ticks: 30
   detect-range: 24.0
   spawn-detect-range: 96.0
+  initial-spawn-exit-only-ticks: 45
   movement-speed: 1.08
   spawn-exit-speed: 0.32
   spawn-exit-max-horizontal-speed: 0.42
@@ -172,46 +183,87 @@ mass:
 
 random-name-max-length: 12
 random-names:
-  - Artyom
-  - Artem
-  - Andrey
-  - Anton
-  - Daniil
-  - Danil
-  - Denis
-  - Dima
-  - Dimon
-  - Egor
-  - Gleb
-  - Ilya
-  - Ivan
-  - Kirill
-  - Kostya
-  - Maksim
-  - Matvey
-  - Misha
-  - Nikita
-  - Oleg
-  - Pavel
-  - Roma
-  - Roman
-  - Ruslan
-  - Sasha
-  - Sergey
-  - Timur
-  - Vadim
-  - Vladik
-  - Vlad
-  - Yarik
-  - Zhenya
-  - qMisha
-  - xNikita
-  - zKirill
-  - DaniilYT
-  - RomaPvP
-  - IlyaPlay
-  - JustArtem
-  - VladPro
+  - reliq
+  - virex
+  - Kavox
+  - melyq
+  - Neyro
+  - xSainz
+  - qDeyro
+  - Lunex
+  - vMoris
+  - Aqven
+  - zRiley
+  - Nexiq
+  - Tayro
+  - xKaven
+  - Ravix
+  - yMiro
+  - qVlade
+  - Drezix
+  - Laynq
+  - Selyx
+  - Kirox
+  - Nerqo
+  - Mavix
+  - Vendy
+  - zNexy
+  - Raynq
+  - wexin
+  - qNiko
+  - Morix
+  - Aroxy
+  - Ryven
+  - Limor
+  - qArel
+  - zMiro
+  - Vayro
+  - xNerq
+  - Deyron
+  - Relyx
+  - Kezzy
+  - mKiro
+  - Ruvex
+  - qFayn
+  - iSely
+  - Nixor
+  - Zavix
+  - xLunq
+  - Avenq
+  - Miroq
+  - tRivo
+  - zVendy
+  - Rezon
+  - xArven
+  - Kairox
+  - vNoxy
+  - Neyq
+  - qKaven
+  - Drezq
+  - xRayn
+  - Limer
+  - Savoq
+  - Morven
+  - zKavon
+  - Arqon
+  - qRiley
+  - vDeyro
+  - xMavix
+  - Vireon
+  - Neryx
+  - qMoris
+  - Laynex
+  - Ryloq
+  - zAven
+  - xRavix
+  - Krezzy
+  - qNexiq
+  - iVladex
+  - Deyro
+  - Kavon
+  - yNerqo
+  - rSelyx
+  - mRayn
 
 proxy-bridge:
   enabled: true
