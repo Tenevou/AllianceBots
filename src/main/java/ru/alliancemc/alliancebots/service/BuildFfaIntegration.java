@@ -184,16 +184,16 @@ public final class BuildFfaIntegration {
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public void registerPlacedBlock(Block block, Material material, Player player) {
+    public boolean registerPlacedBlock(Block block, Material material, Player player) {
         if (block == null || material == null || player == null || !isAvailable()) {
-            return;
+            return false;
         }
         try {
             Class<?> blockingClass = Class.forName("rbw.alliancemc.bffa.listeners.Blocking");
             Field placedBlocksField = blockingClass.getField("placedBlocks");
             Object placedBlocksObject = placedBlocksField.get(null);
             if (!(placedBlocksObject instanceof Map)) {
-                return;
+                return false;
             }
             Map placedBlocks = (Map) placedBlocksObject;
             Object existing = placedBlocks.get(block);
@@ -204,10 +204,12 @@ public final class BuildFfaIntegration {
             Constructor<?> constructor = taskClass.getConstructor(Block.class, Material.class, Player.class);
             Object task = constructor.newInstance(block, material, player);
             placedBlocks.put(block, task);
+            return true;
         } catch (Exception ex) {
             if (plugin.getConfig().getBoolean("fight.building.debug", false)) {
                 plugin.getLogger().warning("BuildFFA placed block registration failed: " + ex.getMessage());
             }
+            return false;
         }
     }
 
@@ -516,6 +518,19 @@ public final class BuildFfaIntegration {
                 syncEquipment(player);
             }
         }, delay);
+    }
+
+    public void syncHeldItem(Player player) {
+        if (player == null || !player.isValid()) {
+            return;
+        }
+        try {
+            sendEquipmentPacket(player, 0, player.getItemInHand());
+        } catch (Exception ex) {
+            if (plugin.getConfig().getBoolean("fight.tab.debug", false)) {
+                plugin.getLogger().warning("Held item sync failed: " + ex.getMessage());
+            }
+        }
     }
 
     private void syncEquipment(Player player) {

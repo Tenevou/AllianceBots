@@ -2,9 +2,11 @@ package ru.alliancemc.alliancebots.bot;
 
 import java.util.Random;
 import java.util.Locale;
+import java.util.List;
 import net.citizensnpcs.api.CitizensAPI;
 import net.citizensnpcs.api.ai.Navigator;
 import net.citizensnpcs.api.npc.NPC;
+import net.citizensnpcs.util.PlayerAnimation;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -36,6 +38,7 @@ public final class FightBotController {
     private int hitSelectCooldownTicks;
     private int lastReleaseTicks;
     private int buildCooldownTicks;
+    private int buildCombatLockTicks;
     private int stuckTicks;
     private boolean forwardMovementEnabled = true;
     private boolean sprintState = true;
@@ -63,6 +66,9 @@ public final class FightBotController {
         }
         if (buildCooldownTicks > 0) {
             buildCooldownTicks--;
+        }
+        if (buildCombatLockTicks > 0) {
+            buildCombatLockTicks--;
         }
         if (bot.isInitialSpawnExitActive()) {
             Entity entity = bot.getNPC().getEntity();
@@ -99,8 +105,13 @@ public final class FightBotController {
         if (shouldDelayForHitSelect(target)) {
             return;
         }
+        Entity attackEntity = bot.getNPC().getEntity();
+        if (attackEntity instanceof Player) {
+            selectWeaponSlot((Player) attackEntity);
+        }
         boolean successfulHit = attackController.tryAttack(target, tick);
         if (successfulHit) {
+            lockBuildingAfterCombat();
             maybeStartTap(target);
         }
         debugTap(successfulHit, bot.getState() == BotState.W_TAP_RELEASE);
@@ -108,6 +119,7 @@ public final class FightBotController {
 
     public void enterKnockback(Entity damager) {
         cancelTap();
+        lockBuildingAfterCombat();
         if (!bot.isTargetLocked() && damager instanceof Player && isValidTarget((Player) damager)) {
             bot.setTarget((Player) damager);
         }
@@ -481,7 +493,13 @@ public final class FightBotController {
                 || !plugin.getConfig().getBoolean("fight.building.enabled", true)) {
             return false;
         }
-        if (buildCooldownTicks > 0 || plugin.getBuildFfaIntegration().isPlayerInSpawn(player)) {
+        if (buildCooldownTicks > 0 || buildCombatLockTicks > 0 || bot.getState() == BotState.KNOCKBACK
+                || plugin.getBuildFfaIntegration().isPlayerInSpawn(player)) {
+            return false;
+        }
+        double enemyNearbyRange = plugin.getConfig().getDouble("fight.building.enemy-nearby-range", 5.0D);
+        if (player.getWorld().equals(target.getWorld())
+                && player.getLocation().distanceSquared(target.getLocation()) <= enemyNearbyRange * enemyNearbyRange) {
             return false;
         }
         double yDelta = target.getLocation().getY() - player.getLocation().getY();
@@ -517,16 +535,44 @@ public final class FightBotController {
             return false;
         }
 
+        int previousSlot = player.getInventory().getHeldItemSlot();
         ItemStack stack = slot >= 0 ? player.getInventory().getItem(slot) : new ItemStack(configuredMaterial, 1);
         if (stack == null || stack.getType() == Material.AIR || !stack.getType().isBlock()) {
             return false;
         }
+        if (slot >= 0) {
+            player.getInventory().setHeldItemSlot(slot);
+            plugin.getBuildFfaIntegration().syncHeldItem(player);
+        }
+        bot.setState(BotState.PLACE_SINGLE_BLOCK);
+        rotationController.lookAtDirection(block.getLocation().toVector()
+                .add(new Vector(0.5D, 0.5D, 0.5D))
+                .subtract(player.getEyeLocation().toVector()), false);
+        PlayerAnimation.ARM_SWING.play(player);
         byte data = stack.getData() == null ? 0 : stack.getData().getData();
         block.setTypeIdAndData(stack.getType().getId(), data, true);
-        plugin.getBuildFfaIntegration().registerPlacedBlock(block, stack.getType(), player);
+        boolean registered = plugin.getBuildFfaIntegration().registerPlacedBlock(block, stack.getType(), player);
+        if (!registered && plugin.getConfig().getBoolean("fight.building.require-ffa-registration", true)) {
+            block.setType(Material.AIR);
+            restoreCombatSlot(player, previousSlot);
+            return false;
+        }
         consumeBuildBlock(player, slot);
+        restoreCombatSlot(player, previousSlot);
         buildCooldownTicks = Math.max(1, plugin.getConfig().getInt("fight.building.cooldown-ticks", 8));
         stuckTicks = 0;
+        if (bot.isDebug()) {
+            AllianceBotsPlugin.getInstance().getLogger().info("debug " + bot.getNPC().getName()
+                    + " selectedSlot=" + player.getInventory().getHeldItemSlot()
+                    + " selectedItem=" + (player.getItemInHand() == null ? "AIR" : player.getItemInHand().getType())
+                    + " buildingBlockSlot=" + slot
+                    + " buildingBlockAmount=" + (stack == null ? 0 : stack.getAmount())
+                    + " placementLocation=" + block.getX() + "," + block.getY() + "," + block.getZ()
+                    + " placementAllowed=true"
+                    + " ffaBlockRegistered=" + registered
+                    + " itemConsumed=" + (slot >= 0)
+                    + " previousSlotRestored=true");
+        }
         return true;
     }
 
@@ -536,7 +582,15 @@ public final class FightBotController {
     }
 
     private Block getSelfSupportPlacementBlock(Player player) {
-        return player.getLocation().clone().subtract(0.0D, 0.15D, 0.0D).getBlock();
+        AllianceBotsPlugin plugin = AllianceBotsPlugin.getInstance();
+        Location location = player.getLocation();
+        int feetBlockY = location.getBlockY();
+        double clearance = location.getY() - feetBlockY;
+        double minimumClearance = plugin.getConfig().getDouble("fight.building.minimum-feet-clearance", 0.72D);
+        if (clearance < minimumClearance) {
+            return null;
+        }
+        return location.getBlock();
     }
 
     private boolean canPlaceSupportBlock(Player player, Block block) {
@@ -553,7 +607,23 @@ public final class FightBotController {
         if (block.getRelative(0, 1, 0).getType().isSolid()) {
             return false;
         }
+        if (hasOtherEntityInBlock(player, block)) {
+            return false;
+        }
         return hasPlacementSupport(block);
+    }
+
+    private boolean hasOtherEntityInBlock(Player player, Block block) {
+        Location center = block.getLocation().clone().add(0.5D, 0.5D, 0.5D);
+        for (Entity entity : block.getWorld().getNearbyEntities(center, 0.48D, 0.95D, 0.48D)) {
+            if (entity == null || entity.equals(player)) {
+                continue;
+            }
+            if (entity instanceof Player) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasPlacementSupport(Block block) {
@@ -572,19 +642,34 @@ public final class FightBotController {
 
     private int findBuildBlockSlot(Player player, Material configuredMaterial) {
         ItemStack[] contents = player.getInventory().getContents();
-        for (int i = 0; i < contents.length; i++) {
+        for (int i = 0; i < Math.min(9, contents.length); i++) {
             ItemStack item = contents[i];
             if (item == null || item.getAmount() <= 0 || item.getType() == Material.AIR || !item.getType().isBlock()) {
                 continue;
             }
-            if (item.getType() == configuredMaterial || item.getType() == Material.WOOL) {
-                if (i >= 0 && i <= 8) {
-                    player.getInventory().setHeldItemSlot(i);
-                }
+            if (isAllowedBuildMaterial(item.getType(), configuredMaterial)) {
                 return i;
             }
         }
         return -1;
+    }
+
+    private boolean isAllowedBuildMaterial(Material material, Material configuredMaterial) {
+        if (material == null || !material.isBlock()) {
+            return false;
+        }
+        List<String> configured = AllianceBotsPlugin.getInstance().getConfig()
+                .getStringList("fight.building.materials");
+        if (configured == null || configured.isEmpty()) {
+            return material == configuredMaterial || material == Material.WOOL;
+        }
+        for (String value : configured) {
+            Material allowed = Material.getMaterial(value == null ? "" : value.toUpperCase(Locale.ENGLISH));
+            if (allowed == material) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void consumeBuildBlock(Player player, int slot) {
@@ -601,6 +686,51 @@ public final class FightBotController {
             item.setAmount(item.getAmount() - 1);
         }
         player.updateInventory();
+    }
+
+    private void restoreCombatSlot(Player player, int previousSlot) {
+        int weaponSlot = findWeaponSlot(player);
+        int slot = weaponSlot >= 0 ? weaponSlot : previousSlot;
+        if (slot >= 0 && slot <= 8) {
+            player.getInventory().setHeldItemSlot(slot);
+        }
+        AllianceBotsPlugin.getInstance().getBuildFfaIntegration().syncHeldItem(player);
+    }
+
+    private boolean selectWeaponSlot(Player player) {
+        int weaponSlot = findWeaponSlot(player);
+        if (weaponSlot < 0 || weaponSlot > 8) {
+            return false;
+        }
+        if (player.getInventory().getHeldItemSlot() != weaponSlot) {
+            player.getInventory().setHeldItemSlot(weaponSlot);
+            AllianceBotsPlugin.getInstance().getBuildFfaIntegration().syncHeldItem(player);
+        }
+        return true;
+    }
+
+    private int findWeaponSlot(Player player) {
+        ItemStack[] contents = player.getInventory().getContents();
+        for (int i = 0; i < Math.min(9, contents.length); i++) {
+            ItemStack item = contents[i];
+            if (item != null && item.getAmount() > 0 && isWeapon(item.getType())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private boolean isWeapon(Material material) {
+        return material == Material.DIAMOND_SWORD
+                || material == Material.IRON_SWORD
+                || material == Material.STONE_SWORD
+                || material == Material.WOOD_SWORD
+                || material == Material.GOLD_SWORD;
+    }
+
+    private void lockBuildingAfterCombat() {
+        buildCombatLockTicks = Math.max(buildCombatLockTicks, AllianceBotsPlugin.getInstance().getConfig()
+                .getInt("fight.building.combat-lock-ticks", 40));
     }
 
     private void configureNavigator(Navigator navigator, double distanceMargin) {

@@ -32,7 +32,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
     private static final List<String> ROOT = Arrays.asList(
             "create", "remove", "removeall", "mass", "spawnmany", "hunt", "masshunt", "select", "target",
             "start", "stop", "teleport", "info", "list", "reload", "set", "mode", "difficulty", "strength",
-            "power", "setspawn", "respawn", "reset", "debug");
+            "power", "fightall", "botfight", "setspawn", "respawn", "reset", "debug");
     private static final List<String> SET = Arrays.asList(
             "swingrange", "hitrange", "cpsmin", "cpsmax", "speed", "damage",
             "preferred-distance", "too-close-distance", "knockback-mode", "knockback-horizontal",
@@ -86,6 +86,8 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             mode(sender, args);
         } else if ("difficulty".equals(sub) || "strength".equals(sub) || "power".equals(sub)) {
             difficulty(sender, args);
+        } else if ("fightall".equals(sub) || "botfight".equals(sub)) {
+            fightAll(sender, args);
         } else if ("setspawn".equals(sub)) {
             setSpawn(sender, args);
         } else if ("respawn".equals(sub) || "reset".equals(sub)) {
@@ -171,7 +173,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         MassOptions options;
         try {
             count = parsePositiveInt(args[1]);
-            minutes = parsePositiveInt(args[3]);
+            minutes = parseNonNegativeInt(args[3]);
             options = parseSpawnOptions(args, 4, BotDifficulty.HARD, 0, parseBoolean(args[2]), false);
         } catch (IllegalArgumentException ex) {
             msg().send(sender, "&c" + ex.getMessage());
@@ -199,7 +201,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         MassOptions options;
         try {
             count = parsePositiveInt(args[2]);
-            minutes = parsePositiveInt(args[3]);
+            minutes = parseNonNegativeInt(args[3]);
             options = parseSpawnOptions(args, 4, BotDifficulty.HARD, 0, false, true);
         } catch (IllegalArgumentException ex) {
             msg().send(sender, "&c" + ex.getMessage());
@@ -240,7 +242,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
             plugin.getProxyBridgeService().sendUpdate();
             scheduleGradualRemoval(created, minutes);
             msg().send(sender, "&aSpawned &e" + created.size() + " &a" + difficultyCopy.name()
-                    + " FIGHT bots for &e" + minutes + " &amin. Bot-vs-bot: &e" + botVsBot
+                    + " FIGHT bots " + durationText(minutes) + "&a. Bot-vs-bot: &e" + botVsBot
                     + "&a." + targetPart);
             return;
         }
@@ -269,8 +271,8 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
                 }
             }, (long) index * joinIntervalMinutes * 60L * 20L);
         }
-        msg().send(sender, "&aQueued &e" + count + " &a" + difficultyCopy.name() + " FIGHT bots for &e" + minutes
-                + " &amin. Join interval: &e" + joinIntervalMinutes + " min&a. Bot-vs-bot: &e"
+        msg().send(sender, "&aQueued &e" + count + " &a" + difficultyCopy.name() + " FIGHT bots "
+                + durationText(minutes) + "&a. Join interval: &e" + joinIntervalMinutes + " min&a. Bot-vs-bot: &e"
                 + botVsBot + "&a." + targetPart);
     }
 
@@ -298,6 +300,9 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
     }
 
     private void scheduleGradualRemoval(final List<NPC> bots, int minutes) {
+        if (minutes <= 0) {
+            return;
+        }
         long baseDelay = Math.max(1, minutes) * 60L * 20L;
         int minStagger = Math.max(1, plugin.getConfig().getInt("mass.leave-stagger-min-ticks", 20));
         int maxStagger = Math.max(minStagger, plugin.getConfig().getInt("mass.leave-stagger-max-ticks", 70));
@@ -668,6 +673,35 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         msg().send(sender, "&fDifficulty set to &a" + difficulty + "&f.");
     }
 
+    private void fightAll(CommandSender sender, String[] args) {
+        if (!has(sender, "alliancebots.control")) {
+            return;
+        }
+        if (args.length < 2) {
+            msg().send(sender, "&cUsage: /bot fightall <on|off>");
+            return;
+        }
+        boolean enabled = parseBoolean(args[1]);
+        int changed = 0;
+        for (NPC npc : CitizensAPI.getNPCRegistry()) {
+            if (!npc.hasTrait(ClipBotTrait.class)) {
+                continue;
+            }
+            ClipBotTrait bot = npc.getTrait(ClipBotTrait.class);
+            if (bot.getMode() != BotMode.FIGHT) {
+                continue;
+            }
+            bot.setAttackOtherBots(enabled);
+            if (enabled) {
+                bot.setTargetLocked(false);
+            }
+            changed++;
+        }
+        CitizensAPI.getNPCRegistry().saveToStore();
+        msg().send(sender, "&aBot-vs-bot is now &e" + (enabled ? "on" : "off")
+                + " &afor &e" + changed + " &aFIGHT bots.");
+    }
+
     private void setSpawn(CommandSender sender, String[] args) {
         if (!has(sender, "alliancebots.control")) {
             return;
@@ -739,6 +773,14 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         return parsed;
     }
 
+    private int parseNonNegativeInt(String value) {
+        int parsed = parseInt(value);
+        if (parsed < 0) {
+            throw new IllegalArgumentException("Expected zero or a positive integer.");
+        }
+        return parsed;
+    }
+
     private MassOptions parseSpawnOptions(String[] args, int startIndex, BotDifficulty defaultDifficulty,
                                           int defaultJoinIntervalMinutes, boolean defaultBotVsBot,
                                           boolean allowBotVsBotOption) {
@@ -747,7 +789,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
         options.joinIntervalMinutes = defaultJoinIntervalMinutes;
         options.botVsBot = defaultBotVsBot;
         boolean difficultySet = false;
-        boolean joinIntervalSet = defaultJoinIntervalMinutes > 0;
+        boolean joinIntervalSet = false;
         boolean botVsBotSet = false;
         for (int i = startIndex; i < args.length; i++) {
             String token = args[i];
@@ -772,13 +814,17 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
                 if (joinIntervalSet) {
                     throw new IllegalArgumentException("Join interval is already set.");
                 }
-                options.joinIntervalMinutes = parsePositiveInt(token);
+                options.joinIntervalMinutes = parseNonNegativeInt(token);
                 joinIntervalSet = true;
                 continue;
             }
             throw new IllegalArgumentException("Unknown spawn option: " + token + ".");
         }
         return options;
+    }
+
+    private String durationText(int minutes) {
+        return minutes <= 0 ? "&auntil &e/bot removeall" : "&afor &e" + minutes + " &amin";
     }
 
     private BotDifficulty parseDifficultyToken(String value) {
@@ -988,12 +1034,12 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
     }
 
     private void help(CommandSender sender) {
-        msg().send(sender, "&e/clipbot create [name] &7| &e/bot mass <count> <bot-vs-bot:true|false> <minutes> [difficulty] [join-interval-minutes]");
+        msg().send(sender, "&e/clipbot create [name] &7| &e/bot mass <count> <bot-vs-bot:true|false> <minutes> [join-interval] [difficulty]");
         msg().send(sender, "&e/bot hunt <player> <count> <minutes> [difficulty] [join-interval-minutes] [bot-vs-bot]");
         msg().send(sender, "&e/clipbot remove <name> &7| &e/bot removeall");
         msg().send(sender, "&e/clipbot select <name> &7| &e/clipbot target <player>");
         msg().send(sender, "&e/clipbot start &7| &e/clipbot stop &7| &e/clipbot teleport");
-        msg().send(sender, "&e/bot mode [name] <clip|fight> &7| &e/bot difficulty [name] <easy|medium|hard>");
+        msg().send(sender, "&e/bot mode [name] <clip|fight> &7| &e/bot difficulty [name] <easy|medium|hard> &7| &e/bot fightall <on|off>");
         msg().send(sender, "&e/bot setspawn [name] &7| &e/bot respawn [name] &7| &e/bot debug [name] <on|off>");
         msg().send(sender, "&e/clipbot info &7| &e/clipbot list &7| &e/clipbot set [name] <option> <value>");
     }
@@ -1029,7 +1075,7 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
                 return startsWith(Arrays.asList("1", "5", "10", "30"), args[3]);
             }
             if (args.length == 5 || args.length == 6) {
-                return startsWith(Arrays.asList("easy", "medium", "hard", "1", "2", "5", "10"), args[args.length - 1]);
+                return startsWith(Arrays.asList("0", "easy", "medium", "hard", "1", "2", "5", "10"), args[args.length - 1]);
             }
             return new ArrayList<String>();
         }
@@ -1048,10 +1094,13 @@ public final class ClipBotCommand implements CommandExecutor, TabCompleter {
                 return startsWith(Arrays.asList("1", "5", "10", "30"), args[3]);
             }
             if (args.length >= 5 && args.length <= 7) {
-                return startsWith(Arrays.asList("easy", "medium", "hard", "1", "2", "5", "10", "false", "true"),
+                return startsWith(Arrays.asList("0", "easy", "medium", "hard", "1", "2", "5", "10", "false", "true"),
                         args[args.length - 1]);
             }
             return new ArrayList<String>();
+        }
+        if (args.length == 2 && ("fightall".equalsIgnoreCase(args[0]) || "botfight".equalsIgnoreCase(args[0]))) {
+            return startsWith(Arrays.asList("on", "off", "true", "false"), args[1]);
         }
         if (args.length == 2 && ("set".equalsIgnoreCase(args[0]))) {
             List<String> values = new ArrayList<String>();

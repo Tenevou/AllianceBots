@@ -95,13 +95,21 @@ fight:
   building:
     enabled: true
     material: WOOL
+    materials:
+      - WOOL
+      - SANDSTONE
+      - WOOD
     require-inventory-block: true
+    require-ffa-registration: true
     target-y-threshold: 1.15
     stuck-ticks: 8
+    combat-lock-ticks: 40
+    enemy-nearby-range: 5.0
     jump-velocity: 0.42
-    jump-place-delay-ticks: 2
+    jump-place-delay-ticks: 4
+    minimum-feet-clearance: 0.72
     minimum-place-y-velocity: -0.12
-    cooldown-ticks: 8
+    cooldown-ticks: 14
     debug: false
   detect-range: 24.0
   spawn-detect-range: 96.0

@@ -6,6 +6,7 @@ public enum BotState {
     SPRINTING,
     W_TAP_RELEASE,
     W_TAP_RESUME,
+    PLACE_SINGLE_BLOCK,
     SWING,
     ATTACK,
     KNOCKBACK,
